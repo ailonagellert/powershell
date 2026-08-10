@@ -1,0 +1,45 @@
+# Secrets / local config
+*.env
+.env.*
+*.pfx
+*.p12
+*.pem
+*.key
+*.cer
+*.crt
+secrets/
+credentials/
+*.credential
+*Secret*
+*Password*
+AppConfig.ps1
+!AppConfig.example.ps1
+
+# Local / machine-specific
+*.local.ps1
+local.settings.*
+config.local.*
+
+# Logs and temp
+*.log
+*.tmp
+*.temp
+Thumbs.db
+Desktop.ini
+
+# PowerShell / IDE
+*.ps1xml.bak
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# OS
+.DS_Store
+
+# Outputs
+*.csv
+!**/examples/**/*.csv
+out/
+output/
+reports/
