@@ -1,0 +1,58 @@
+Blue Screen RCA Analyzer - how to share / run
+============================================
+
+What to send your buddy
+-----------------------
+Send BOTH of these files (keep them in the same folder):
+
+  1) Invoke-BlueScreenRCA.ps1
+  2) Run-BlueScreenRCA.cmd
+
+How they run it
+---------------
+Easiest:
+  - Right-click Run-BlueScreenRCA.cmd
+  - Choose "Run as administrator"
+  - Approve the UAC prompt
+  - Wait for the report to open in the browser
+    (first run may install WinDbg via winget if dumps exist)
+
+PowerShell:
+  cd <folder-with-script>
+  Set-ExecutionPolicy -Scope Process Bypass
+  .\Invoke-BlueScreenRCA.ps1 -OpenReport
+
+Dump analysis (WinDbg)
+----------------------
+If dumps are present and WinDbg/cdb is missing, the script
+automatically tries:
+
+  winget install Microsoft.WinDbg
+
+Then runs !analyze -v and includes the faulting module in the report.
+
+Optional:
+  .\Invoke-BlueScreenRCA.ps1 -SkipDebuggerInstall -OpenReport
+      (do not install anything)
+
+  .\Invoke-BlueScreenRCA.ps1 -SkipDumpAnalysis -OpenReport
+      (events/dumps only; no debugger)
+
+What they send back
+-------------------
+A folder on the Desktop named like:
+
+  BSOD-RCA-<COMPUTERNAME>-<timestamp>\
+
+Inside it:
+  BSOD-RCA-Report.html   <- read this first
+  BSOD-RCA-Report.txt
+  BSOD-RCA-Data.json
+  dumps\                 <- minidumps if present
+  windbg\                <- !analyze -v logs if analysis ran
+
+Notes
+-----
+- Event/dump inventory works offline.
+- Auto WinDbg install needs winget + usually admin.
+- Dump analysis needs internet for first-time symbol download.
