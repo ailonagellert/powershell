@@ -38,21 +38,34 @@ Optional:
   .\Invoke-BlueScreenRCA.ps1 -SkipDumpAnalysis -OpenReport
       (events/dumps only; no debugger)
 
-What they send back
--------------------
+What they send back / how to use AI
+-----------------------------------
 A folder on the Desktop named like:
 
   BSOD-RCA-<COMPUTERNAME>-<timestamp>\
 
 Inside it:
-  BSOD-RCA-Report.html   <- read this first
+  PASTE-INTO-COPILOT.txt  <- copy/paste this into Copilot / ChatGPT
+  BSOD-RCA-Report.html    <- human-readable report
   BSOD-RCA-Report.txt
   BSOD-RCA-Data.json
-  dumps\                 <- minidumps if present
-  windbg\                <- !analyze -v logs if analysis ran
+  dumps\                  <- minidumps if present
+  windbg\                 <- !analyze -v logs if analysis ran
+
+Typical tech workflow:
+  1) Run the analyzer elevated
+  2) When it finishes, PASTE-INTO-COPILOT.txt is already on the clipboard
+  3) Open Microsoft Copilot (or ChatGPT / Claude)
+  4) Paste (Ctrl+V) and send
+  5) Use the AI reply for next steps / ticket wording
+  6) Keep the full BSOD-RCA-* folder if escalating to Tier 3
+
+If clipboard copy was blocked, open PASTE-INTO-COPILOT.txt,
+Select All, Copy, then paste into the AI chat.
 
 Notes
 -----
 - Event/dump inventory works offline.
 - Auto WinDbg install needs winget + usually admin.
 - Dump analysis needs internet for first-time symbol download.
+- Use -SkipClipboard if you do not want the AI paste file on the clipboard.

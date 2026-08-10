@@ -21,7 +21,8 @@ No modules required. Event/dump inventory works offline. Dump analysis uses Micr
 2. Right-click `Run-BlueScreenRCA.cmd` → **Run as administrator**.
 3. Approve UAC and wait (first run may install WinDbg via winget).
 4. An HTML report opens when it finishes.
-5. Send back the `BSOD-RCA-<ComputerName>-<timestamp>` folder from the Desktop.
+5. `PASTE-INTO-COPILOT.txt` is written and copied to the clipboard — paste into Copilot/ChatGPT for a second-pass analysis.
+6. Send back the `BSOD-RCA-<ComputerName>-<timestamp>` folder from the Desktop if escalating.
 
 ### PowerShell (manual)
 
@@ -41,6 +42,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 | `-SkipDumpAnalysis` | off | Never run dump analysis |
 | `-InstallDebuggers` | off | Force winget install attempt |
 | `-SkipDebuggerInstall` | off | Never auto-install WinDbg/SDK |
+| `-SkipClipboard` | off | Do not copy `PASTE-INTO-COPILOT.txt` to clipboard |
 | `-MaxDumpsToAnalyze` | `3` | Newest dumps to analyze |
 | `-MaxDumpSizeMB` | `2048` | Skip larger dumps for auto analysis |
 | `-DumpAnalysisTimeoutSec` | `300` | Per-dump timeout |
@@ -83,12 +85,21 @@ Admin + winget help installs succeed on locked-down machines. First symbol downl
 Desktop folder like `BSOD-RCA-DESKTOP01-20260810-131500\`:
 
 ```
-BSOD-RCA-Report.html   ← start here
+PASTE-INTO-COPILOT.txt ← paste this into Copilot / ChatGPT / Claude
+BSOD-RCA-Report.html   ← human-readable report
 BSOD-RCA-Report.txt
 BSOD-RCA-Data.json
 dumps\                 ← copied minidumps (≤500 MB each)
 windbg\                ← raw !analyze -v logs (when analysis ran)
 ```
+
+## Copilot / AI workflow
+
+1. Run the analyzer elevated.
+2. When it finishes, `PASTE-INTO-COPILOT.txt` is on the clipboard (unless `-SkipClipboard`).
+3. Open Microsoft Copilot (or ChatGPT / Claude) and paste.
+4. The paste file already includes a prompt asking for root cause, confidence, next actions, and a short ticket note.
+5. Use HTML for the human report; use the paste file for AI. Attach dumps/`windbg` only if needed.
 
 ## Requirements and limits
 
@@ -101,5 +112,6 @@ windbg\                ← raw !analyze -v logs (when analysis ran)
 
 - [ ] Send `Invoke-BlueScreenRCA.ps1` + `Run-BlueScreenRCA.cmd` together
 - [ ] Ask them to run elevated
-- [ ] Ask for the full `BSOD-RCA-*` Desktop folder back
-- [ ] Open `BSOD-RCA-Report.html` first; check `windbg\` if present
+- [ ] Paste `PASTE-INTO-COPILOT.txt` into Copilot for analysis / ticket wording
+- [ ] Ask for the full `BSOD-RCA-*` Desktop folder back when escalating
+- [ ] Open `BSOD-RCA-Report.html` for humans; check `windbg\` if present

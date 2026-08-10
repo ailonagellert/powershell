@@ -5,7 +5,8 @@
 
 .DESCRIPTION
     Collects bugcheck events, crash dumps, WHEA/hardware errors, power failures,
-    and recent driver/software changes, then produces a plain-language RCA report.
+    and recent driver/software changes, then produces a plain-language RCA report
+    plus PASTE-INTO-COPILOT.txt (copied to clipboard) for second-pass AI analysis.
 
     If Debugging Tools / WinDbg is missing and dumps need analysis, the script
     automatically installs WinDbg Preview via winget when possible (unless
@@ -49,6 +50,9 @@
 .PARAMETER SkipDebuggerInstall
     Do not attempt winget installs. Analysis only runs if WinDbg/cdb is already present.
 
+.PARAMETER SkipClipboard
+    Do not copy PASTE-INTO-COPILOT.txt to the clipboard when finished.
+
 .EXAMPLE
     .\Invoke-BlueScreenRCA.ps1 -OpenReport
 
@@ -83,7 +87,9 @@ param(
 
     [switch]$InstallDebuggers,
 
-    [switch]$SkipDebuggerInstall
+    [switch]$SkipDebuggerInstall,
+
+    [switch]$SkipClipboard
 )
 
 $ErrorActionPreference = 'Continue'
@@ -113,9 +119,133 @@ function Get-ShortText {
 
 function Get-Array {
     param($InputObject)
-    # Leading comma prevents PowerShell from unwrapping a single-element array on return
-    if ($null -eq $InputObject) { return , @() }
-    return , @($InputObject)
+    # Leading comma prevents PowerShell from unwrapping a single-element array on return.
+    # Avoid @($genericList) which can throw "Argument types do not match" on PS 5.1.
+    if ($null -eq $InputObject) { return , [object[]]@() }
+    if ($InputObject -is [System.Collections.ICollection] -and $InputObject -isnot [string] -and $InputObject.PSObject.Methods['ToArray']) {
+        try { return , [object[]]$InputObject.ToArray() } catch { }
+    }
+    if ($InputObject -is [System.Array]) {
+        return , [object[]]$InputObject
+    }
+    return , [object[]]@($InputObject)
+}
+
+function ConvertTo-ObjectArray {
+    param($InputObject)
+    if ($null -eq $InputObject) { return [object[]]@() }
+    if ($InputObject -is [System.Collections.ICollection] -and $InputObject.PSObject.Methods['ToArray']) {
+        try { return [object[]]$InputObject.ToArray() } catch { }
+    }
+    if ($InputObject -is [System.Array]) { return [object[]]$InputObject }
+    $tmp = New-Object System.Collections.Generic.List[object]
+    foreach ($i in @($InputObject)) { [void]$tmp.Add($i) }
+    return [object[]]$tmp.ToArray()
+}
+
+function Get-CrashAnchorTimes {
+    param(
+        $Bugchecks,
+        $Dumps,
+        $DumpAnalyses,
+        [int]$MaxDumpAnchors = 5
+    )
+
+    $times = New-Object System.Collections.Generic.List[datetime]
+
+    # Prefer official BSOD event times when present - do not let year-old dumps widen the filter
+    foreach ($b in (Get-Array $Bugchecks)) {
+        if ($b.TimeCreated) { [void]$times.Add([datetime]$b.TimeCreated) }
+    }
+
+    if ($times.Count -eq 0) {
+        $dumpTimes = New-Object System.Collections.Generic.List[datetime]
+        foreach ($d in (Get-Array $Dumps)) {
+            if (-not $d.LastWriteTime) { continue }
+            if ($d.Name -match '^\d{6}-\d+' -or $d.FullName -match '(?i)\\Kernel_[0-9a-f]+_' -or $d.Name -match '(?i)^(WHEA|WATCHDOG)-') {
+                [void]$dumpTimes.Add([datetime]$d.LastWriteTime)
+            }
+        }
+        foreach ($t in @((ConvertTo-ObjectArray $dumpTimes) | Sort-Object -Descending | Select-Object -First $MaxDumpAnchors)) {
+            [void]$times.Add($t)
+        }
+    }
+
+    foreach ($a in (Get-Array $DumpAnalyses)) {
+        if ($a.DumpPath -and (Test-Path -LiteralPath $a.DumpPath)) {
+            try {
+                $wt = (Get-Item -LiteralPath $a.DumpPath).LastWriteTime
+                # Only add analysis dump times if close to an existing anchor, or if we still have none
+                if ($times.Count -eq 0 -or (Test-IsNearCrashTime -Time $wt -AnchorTimes (ConvertTo-ObjectArray $times) -BeforeHours 24 -AfterHours 24)) {
+                    [void]$times.Add($wt)
+                }
+            }
+            catch { }
+        }
+    }
+
+    if ($times.Count -eq 0) { return , [object[]]@() }
+
+    $sorted = @(ConvertTo-ObjectArray $times | Sort-Object)
+    $collapsed = New-Object System.Collections.Generic.List[datetime]
+    foreach ($t in $sorted) {
+        if ($collapsed.Count -eq 0 -or ($t - $collapsed[$collapsed.Count - 1]).TotalMinutes -gt 5) {
+            [void]$collapsed.Add($t)
+        }
+    }
+    return , (ConvertTo-ObjectArray $collapsed)
+}
+
+function Test-IsNearCrashTime {
+    param(
+        [datetime]$Time,
+        [datetime[]]$AnchorTimes,
+        [double]$BeforeHours,
+        [double]$AfterHours
+    )
+    if (-not $AnchorTimes -or @($AnchorTimes).Count -eq 0) { return $false }
+    foreach ($a in $AnchorTimes) {
+        if ($Time -ge $a.AddHours(-$BeforeHours) -and $Time -le $a.AddHours($AfterHours)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Select-ItemsNearCrashTimes {
+    param(
+        $Items,
+        [datetime[]]$AnchorTimes,
+        [double]$BeforeHours,
+        [double]$AfterHours,
+        [string]$TimeProperty = 'TimeCreated',
+        [scriptblock]$ExtraInclude = $null
+    )
+
+    $list = Get-Array $Items
+    if ($list.Count -eq 0) { return , [object[]]@() }
+    if (-not $AnchorTimes -or @(Get-Array $AnchorTimes).Count -eq 0) { return , [object[]]@() }
+
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($item in $list) {
+        $t = $null
+        try { $t = [datetime]($item.$TimeProperty) } catch { }
+        $near = ($null -ne $t -and (Test-IsNearCrashTime -Time $t -AnchorTimes $AnchorTimes -BeforeHours $BeforeHours -AfterHours $AfterHours))
+        $extra = $false
+        if ($ExtraInclude) {
+            try { $extra = [bool](& $ExtraInclude $item) } catch { $extra = $false }
+        }
+        if ($near -or $extra) { [void]$out.Add($item) }
+    }
+    return , (ConvertTo-ObjectArray $out)
+}
+
+function Test-IsNoisyChangeDetail {
+    param($Change)
+    $detail = "$($Change.ChangeType) $($Change.Detail)"
+    if ($detail -match '(?i)VolumeSnapshot|volsnap\.inf|HarddiskVolumeSnapshot') { return $true }
+    if ($detail -match '(?i)Package KB777778|FoD-en-US was successfully changed to the Staged state') { return $true }
+    return $false
 }
 
 function Get-ReportRootDirectory {
@@ -985,7 +1115,7 @@ function Invoke-DumpAnalysisPass {
         }
     }
 
-    return , @($results.ToArray())
+    return , (ConvertTo-ObjectArray $results)
 }
 #endregion WinDbg
 
@@ -1070,7 +1200,10 @@ function Build-RootCauseAssessment {
 
         $primaryCode = $codeLabel
         if ($p.ProcessName) { [void]$findings.Add("Process name: $($p.ProcessName)") }
-        if ($p.StackSummary) { [void]$findings.Add("Stack: $($p.StackSummary)") }
+        if ($p.StackSummary) {
+            $stackShort = ($p.StackSummary -split ' > ' | Select-Object -First 3) -join ' > '
+            [void]$findings.Add("Stack (top frames): $stackShort")
+        }
 
         # Enrich actions from dump context (bucket / process / stack)
         if ($p.FailureBucket -match '(?i)MEMORY_CORRUPTION') {
@@ -1315,7 +1448,7 @@ function Build-NextSteps {
     for ($i = 0; $i -lt $steps.Count; $i++) {
         $steps[$i].Number = $i + 1
     }
-    return , @($steps)
+    return , (ConvertTo-ObjectArray $steps)
 }
 #endregion RCA Engine
 
@@ -1394,9 +1527,16 @@ th{background:#eef5fa}tr:nth-child(even){background:#f9fbfd}code{background:#f0f
 .step-title{font-weight:650;color:#0b3d5c;margin-bottom:4px}
 .step-detail{color:#222;line-height:1.4}
 .why{margin-top:6px;color:#5a6b78;font-size:.9rem}
+.ai-card{border-color:#2f6f4e;background:linear-gradient(180deg,#eef8f2 0%,#fff 56px)}
+.ai-card code{background:#e4f0e9;padding:2px 6px}
 </style></head><body>
 <h1>Blue Screen Root Cause Analysis</h1>
 <p class="meta">Computer: <strong>$(ConvertTo-HtmlEncoded $Context.ComputerName)</strong> | Collected: $(ConvertTo-HtmlEncoded $Context.CollectedAt) | Lookback: $Days days | Elevated: $($Context.IsAdmin)</p>
+<div class="card ai-card">
+  <h2>Paste into Copilot / ChatGPT</h2>
+  <p>Open <code>PASTE-INTO-COPILOT.txt</code> in this report folder (also copied to the clipboard when the script finished). Paste the whole file into Microsoft Copilot, ChatGPT, or Claude for a second-pass analysis and ticket wording.</p>
+  <p class="meta">Keep the HTML for humans; use the paste file for AI. Attach <code>windbg\</code> / dumps only if the AI asks for more detail.</p>
+</div>
 <div class="card">
   <div class="headline">$(ConvertTo-HtmlEncoded $Assessment.Headline)</div>
   <p>Confidence: <span class="badge">$(ConvertTo-HtmlEncoded $Assessment.Confidence)</span>
@@ -1429,18 +1569,47 @@ $($rowsWindbg -join "`n")
 <table><tr><th>Time</th><th>Stop code</th><th>Category</th><th>Parameters</th><th>Likely cause</th></tr>
 $($rowsBug -join "`n")</table></div>
 <div class="card"><h2>Related crash / hardware signals</h2>
+<p class="meta">Only events within <strong>+/- 2 hours</strong> of a BSOD/dump anchor time.</p>
 <table><tr><th>Time</th><th>Type</th><th>Summary</th><th>Message preview</th></tr>
 $($rowsRel -join "`n")</table></div>
 <div class="card"><h2>Crash dump files</h2>
+<p class="meta">Dumps near crash anchors (plus analyzed / event-referenced dumps). Older unrelated live dumps are omitted.</p>
 <table><tr><th>Modified</th><th>Path</th><th>MB</th><th>Age (days)</th><th>On disk</th></tr>
 $($rowsDump -join "`n")</table></div>
-<div class="card"><h2>Recent driver / software / hotfix changes</h2>
+<div class="card"><h2>Driver / software changes near crash times</h2>
+<p class="meta">Within <strong>7 days before</strong> to <strong>1 day after</strong> each BSOD/dump anchor. Volume snapshot / FoD staging noise removed.</p>
 <table><tr><th>Time</th><th>Type</th><th>Detail</th></tr>
 $($rowsChg -join "`n")</table></div>
 <p class="meta">Generated by Invoke-BlueScreenRCA.ps1 (standalone).</p>
 </body></html>
 "@
     Set-Content -Path $Path -Value $html -Encoding UTF8
+}
+
+function Get-WindbgLogExcerpt {
+    param(
+        [string]$LogPath,
+        [int]$MaxChars = 7000
+    )
+    if (-not $LogPath -or -not (Test-Path -LiteralPath $LogPath)) { return '' }
+    try {
+        $raw = Get-Content -LiteralPath $LogPath -Raw -ErrorAction Stop
+    }
+    catch { return '' }
+    if ([string]::IsNullOrWhiteSpace($raw)) { return '' }
+
+    $keep = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($raw -split "`r?`n")) {
+        if ($line -match '(?i)BUGCHECK_ANALYSIS|Bugcheck Analysis|BugCheck |BUGCHECK_CODE|BUGCHECK_P[1-4]|PROCESS_NAME|IMAGE_NAME|MODULE_NAME|FAULTING_MODULE|FAILURE_BUCKET_ID|FAILURE_ID_HASH|Probably caused by|STACK_TEXT|FOLLOWUP_IP|SYMBOL_NAME|BUCKET_ID|Defaulted to|Use !analyze|nvlddmkm|dxgkrnl|ntoskrnl|WHEA|WATCHDOG|MEMORY_CORRUPTION|IRQL|PAGE_FAULT|SYSTEM_SERVICE|KERNEL_MODE|EXCEPTION_CODE|Arg[1-4]|SYSTEM_THREAD|DRIVER_IRQL|CRITICAL_PROCESS|DPC_WATCHDOG') {
+            [void]$keep.Add($line.TrimEnd())
+        }
+    }
+
+    $excerpt = if ($keep.Count -gt 0) { ($keep -join "`n") } else { $raw }
+    if ($excerpt.Length -gt $MaxChars) {
+        $excerpt = $excerpt.Substring(0, $MaxChars) + "`n... [truncated for AI paste size]"
+    }
+    return $excerpt
 }
 
 function New-TextReport {
@@ -1494,12 +1663,14 @@ function New-TextReport {
     foreach ($b in (Get-Array $Bugchecks)) {
         [void]$sb.AppendLine("$($b.TimeCreated)  $($b.BugcheckCode) $($b.BugcheckName) [$($b.Category)]")
         [void]$sb.AppendLine("    Params: $($b.Parameter1), $($b.Parameter2), $($b.Parameter3), $($b.Parameter4)")
+        if ($b.DumpFile) { [void]$sb.AppendLine("    DumpFile: $($b.DumpFile)") }
     }
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('RELATED EVENTS')
     [void]$sb.AppendLine(('-' * 70))
     foreach ($r in (Get-Array $Related | Select-Object -First 40)) {
-        [void]$sb.AppendLine("$($r.TimeCreated)  $($r.Type)")
+        [void]$sb.AppendLine("$($r.TimeCreated)  $($r.Type)  $($r.Summary)")
+        if ($r.Message) { [void]$sb.AppendLine("    $(Get-ShortText $r.Message 320)") }
     }
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('DUMP FILES')
@@ -1516,6 +1687,144 @@ function New-TextReport {
         [void]$sb.AppendLine("    $($c.Detail)")
     }
     Set-Content -Path $Path -Value $sb.ToString() -Encoding UTF8
+}
+
+function New-AiPasteReport {
+    param($Context, $Assessment, $Bugchecks, $Related, $Dumps, $Changes, $DumpConfig, $DumpAnalyses, [string]$Path, [int]$Days)
+
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.AppendLine('=== COPY EVERYTHING BELOW THIS LINE INTO COPILOT / CHATGPT / CLAUDE ===')
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('You are helping an IT technician triage a Windows blue screen (BSOD) or live kernel dump.')
+    [void]$sb.AppendLine('Below is evidence collected by Invoke-BlueScreenRCA.ps1 on the affected PC.')
+    [void]$sb.AppendLine('Treat this as the only source of truth for this machine. Do not invent dump results that are not listed.')
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('Please respond with:')
+    [void]$sb.AppendLine('1) Most likely root cause (with confidence: High / Medium / Low)')
+    [void]$sb.AppendLine('2) What evidence supports that conclusion')
+    [void]$sb.AppendLine('3) Competing alternate causes (if any)')
+    [void]$sb.AppendLine('4) Ordered next actions for a field tech (change one variable at a time)')
+    [void]$sb.AppendLine('5) What to collect next if the cause is still unclear')
+    [void]$sb.AppendLine('6) A short ticket note (5-8 lines) suitable for ServiceNow / Jira')
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('=== MACHINE EVIDENCE START ===')
+    [void]$sb.AppendLine("Computer: $($Context.ComputerName)")
+    [void]$sb.AppendLine("CollectedAt: $($Context.CollectedAt)")
+    [void]$sb.AppendLine("LookbackDays: $Days")
+    [void]$sb.AppendLine("Elevated: $($Context.IsAdmin)")
+    [void]$sb.AppendLine("OS: $($Context.OSCaption) | Version $($Context.OSVersion) | Build $($Context.OSBuild)")
+    [void]$sb.AppendLine("Hardware: $($Context.Manufacturer) $($Context.Model)")
+    [void]$sb.AppendLine("BIOS: $($Context.BIOSVersion)")
+    [void]$sb.AppendLine("CPU: $($Context.Processor)")
+    [void]$sb.AppendLine("MemoryGB: $($Context.MemoryGB)")
+    [void]$sb.AppendLine("LastBoot: $($Context.LastBoot) | UptimeDays: $($Context.UptimeDays)")
+    [void]$sb.AppendLine("CrashDumpType: $($DumpConfig.CrashDumpType) | CrashDumpEnabled: $($DumpConfig.CrashDumpEnabled)")
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('--- Script assessment (starting point, verify against evidence) ---')
+    [void]$sb.AppendLine("Headline: $($Assessment.Headline)")
+    [void]$sb.AppendLine("Confidence: $($Assessment.Confidence)")
+    if ($Assessment.FaultingModule) { [void]$sb.AppendLine("FaultingModule: $($Assessment.FaultingModule)") }
+    foreach ($f in (Get-Array $Assessment.Findings)) { [void]$sb.AppendLine("Finding: $f") }
+    foreach ($s in (Get-Array $Assessment.NextSteps)) {
+        [void]$sb.AppendLine("SuggestedStep $($s.Number): $($s.Title) | $($s.Detail)$(if ($s.Why) { " | Why: $($s.Why)" })")
+    }
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('--- Bugcheck Event ID 1001 ---')
+    $bugs = Get-Array $Bugchecks
+    if ($bugs.Count -eq 0) {
+        [void]$sb.AppendLine('(none in lookback window)')
+    }
+    else {
+        foreach ($b in $bugs) {
+            [void]$sb.AppendLine("Time=$($b.TimeCreated) Code=$($b.BugcheckCode) Name=$($b.BugcheckName) Category=$($b.Category)")
+            [void]$sb.AppendLine("  Params=$($b.Parameter1), $($b.Parameter2), $($b.Parameter3), $($b.Parameter4)")
+            if ($b.LikelyCause) { [void]$sb.AppendLine("  LikelyCause=$($b.LikelyCause)") }
+            if ($b.DumpFile) { [void]$sb.AppendLine("  DumpFile=$($b.DumpFile)") }
+        }
+    }
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('--- WinDbg / cdb !analyze -v (parsed) ---')
+    $analyses = Get-Array $DumpAnalyses
+    if ($analyses.Count -eq 0) {
+        [void]$sb.AppendLine('(no dump analysis ran)')
+    }
+    else {
+        foreach ($a in $analyses) {
+            [void]$sb.AppendLine("Dump=$($a.DumpName) Success=$($a.Success) Reason=$($a.Reason)")
+            if ($a.Parsed) {
+                [void]$sb.AppendLine("  Code=$($a.Parsed.BugcheckCode) Name=$($a.Parsed.BugcheckName)")
+                [void]$sb.AppendLine("  Module=$($a.Parsed.FaultingModule) Driver=$($a.Parsed.FaultingDriver)")
+                [void]$sb.AppendLine("  Process=$($a.Parsed.ProcessName) Symbol=$($a.Parsed.SymbolName)")
+                [void]$sb.AppendLine("  DumpKind=$($a.Parsed.DumpKind) ProbablyCausedBy=$($a.Parsed.ProbablyCausedBy)")
+                [void]$sb.AppendLine("  FailureBucket=$($a.Parsed.FailureBucket)")
+                if ($a.Parsed.StackSummary) { [void]$sb.AppendLine("  Stack=$($a.Parsed.StackSummary)") }
+            }
+            $excerpt = Get-WindbgLogExcerpt -LogPath $a.LogPath -MaxChars 7000
+            if ($excerpt) {
+                [void]$sb.AppendLine('  --- !analyze excerpt ---')
+                [void]$sb.AppendLine($excerpt)
+                [void]$sb.AppendLine('  --- end excerpt ---')
+            }
+        }
+    }
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('--- Related signals within +/- 2 hours of crash anchors ---')
+    $rels = Get-Array ($Related | Select-Object -First 40)
+    if ($rels.Count -eq 0) {
+        [void]$sb.AppendLine('(none)')
+    }
+    else {
+        foreach ($r in $rels) {
+            [void]$sb.AppendLine("Time=$($r.TimeCreated) Type=$($r.Type) Summary=$($r.Summary)")
+            if ($r.Message) { [void]$sb.AppendLine("  Message=$(Get-ShortText $r.Message 400)") }
+        }
+    }
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('--- Dump inventory (filtered near crash anchors) ---')
+    foreach ($d in (Get-Array $Dumps)) {
+        $exists = if ($null -eq $d.Exists -or $d.Exists) { 'Yes' } else { 'Missing' }
+        [void]$sb.AppendLine("Time=$($d.LastWriteTime) MB=$($d.LengthMB) OnDisk=$exists Path=$($d.FullName)")
+    }
+    if (@(Get-Array $Dumps).Count -eq 0) { [void]$sb.AppendLine('(none)') }
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('--- Driver/software changes within 7d before to 1d after crash ---')
+    $chgs = Get-Array ($Changes | Select-Object -First 40)
+    if ($chgs.Count -eq 0) {
+        [void]$sb.AppendLine('(none)')
+    }
+    else {
+        foreach ($c in $chgs) {
+            [void]$sb.AppendLine("Time=$($c.TimeCreated) Type=$($c.ChangeType)")
+            [void]$sb.AppendLine("  Detail=$($c.Detail)")
+        }
+    }
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('=== MACHINE EVIDENCE END ===')
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('=== END OF PASTE ===')
+
+    $text = $sb.ToString()
+    Set-Content -Path $Path -Value $text -Encoding UTF8
+    return $text
+}
+
+function Copy-TextToClipboardSafe {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return $false }
+    try {
+        Set-Clipboard -Value $Text -ErrorAction Stop
+        return $true
+    }
+    catch {
+        try {
+            Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+            [System.Windows.Forms.Clipboard]::SetText($Text)
+            return $true
+        }
+        catch {
+            return $false
+        }
+    }
 }
 #endregion Reporting
 
@@ -1574,12 +1883,28 @@ else {
 }
 
 Write-Section '4/7 Related crash / hardware signals'
-$related = Get-Array (Get-RelatedCrashEvents -Start $start -MaxEvents $Count)
-Write-Info "Related events collected: $(@($related).Count)"
+$relatedAll = Get-Array (Get-RelatedCrashEvents -Start $start -MaxEvents ([Math]::Max($Count, 50)))
+$crashAnchors = Get-CrashAnchorTimes -Bugchecks $bugchecks -Dumps $existingDumps -DumpAnalyses @()
+$related = Get-Array (Select-ItemsNearCrashTimes -Items $relatedAll -AnchorTimes $crashAnchors -BeforeHours 2 -AfterHours 2)
+if (@($crashAnchors).Count -eq 0) {
+    Write-Info 'No BSOD/dump anchors yet - related-event filter deferred until after dump analysis.' 'Yellow'
+    $related = @()
+}
+else {
+    Write-Info "Anchors: $(@($crashAnchors).Count) crash time(s). Related events within +/- 2 hours: $(@($related).Count) (from $(@($relatedAll).Count))" 
+}
 
 Write-Section '5/7 Recent driver / software changes'
-$changes = Get-Array (Get-RecentDriverAndSoftwareChanges -Start $start)
-Write-Info "Change markers collected: $(@($changes).Count)"
+$changesAll = Get-Array (Get-RecentDriverAndSoftwareChanges -Start $start)
+$changesNear = Get-Array (Select-ItemsNearCrashTimes -Items $changesAll -AnchorTimes $crashAnchors -BeforeHours (7 * 24) -AfterHours 24)
+$changes = Get-Array ($changesNear | Where-Object { -not (Test-IsNoisyChangeDetail -Change $_) })
+if (@($crashAnchors).Count -eq 0) {
+    Write-Info 'No crash anchors - skipping noisy full-lookback change list for the report.' 'Yellow'
+    $changes = @()
+}
+else {
+    Write-Info "Changes within 7 days before / 1 day after crash(es): $(@($changes).Count) (filtered from $(@($changesAll).Count); volsnap/FoD noise removed)"
+}
 
 Write-Section '6/7 WinDbg / cdb dump analysis'
 $dumpAnalyses = @()
@@ -1618,6 +1943,26 @@ else {
     }
 }
 
+# Refresh near-crash filters using dump analysis timestamps too
+$crashAnchors = Get-CrashAnchorTimes -Bugchecks $bugchecks -Dumps $existingDumps -DumpAnalyses $dumpAnalyses
+if (@($crashAnchors).Count -gt 0) {
+    $related = Get-Array (Select-ItemsNearCrashTimes -Items $relatedAll -AnchorTimes $crashAnchors -BeforeHours 2 -AfterHours 2)
+    $changesNear = Get-Array (Select-ItemsNearCrashTimes -Items $changesAll -AnchorTimes $crashAnchors -BeforeHours (7 * 24) -AfterHours 24)
+    $changes = Get-Array ($changesNear | Where-Object { -not (Test-IsNoisyChangeDetail -Change $_) })
+    $dumpsForReport = Get-Array (Select-ItemsNearCrashTimes -Items $dumps -AnchorTimes $crashAnchors -BeforeHours (48) -AfterHours 24 -TimeProperty 'LastWriteTime' -ExtraInclude {
+            param($d)
+            # Always keep event-referenced missing dumps and dumps we analyzed
+            ($d.Exists -eq $false) -or
+            (@($dumpAnalyses | Where-Object { $_.DumpPath -and ($_.DumpPath -eq $d.FullName) }).Count -gt 0) -or
+            ($d.Name -match '^\d{6}-\d+')
+        })
+    Write-Info "Report filter using $(@($crashAnchors).Count) crash anchor(s): related=$(@($related).Count), changes=$(@($changes).Count), dumps=$(@($dumpsForReport).Count)" 'Cyan'
+}
+else {
+    $dumpsForReport = Get-Array ($existingDumps | Select-Object -First 10)
+    Write-Info 'No crash anchors available - report will include limited dump inventory only.' 'Yellow'
+}
+
 Write-Section '7/7 Root cause assessment'
 $assessment = Build-RootCauseAssessment -Bugchecks $bugchecks -Related $related -Dumps $existingDumps -Changes $changes -DumpConfig $dumpConfig -Context $context -DumpAnalyses $dumpAnalyses
 Write-Host ""
@@ -1638,10 +1983,12 @@ else {
 
 $htmlPath = Join-Path $OutputDirectory 'BSOD-RCA-Report.html'
 $txtPath = Join-Path $OutputDirectory 'BSOD-RCA-Report.txt'
+$aiPath = Join-Path $OutputDirectory 'PASTE-INTO-COPILOT.txt'
 $jsonPath = Join-Path $OutputDirectory 'BSOD-RCA-Data.json'
 
-New-HtmlReport -Context $context -Assessment $assessment -Bugchecks $bugchecks -Related $related -Dumps $dumps -Changes $changes -DumpConfig $dumpConfig -DumpAnalyses $dumpAnalyses -Path $htmlPath -Days $Days
-New-TextReport -Context $context -Assessment $assessment -Bugchecks $bugchecks -Related $related -Dumps $dumps -Changes $changes -DumpConfig $dumpConfig -DumpAnalyses $dumpAnalyses -Path $txtPath -Days $Days
+New-HtmlReport -Context $context -Assessment $assessment -Bugchecks $bugchecks -Related $related -Dumps $dumpsForReport -Changes $changes -DumpConfig $dumpConfig -DumpAnalyses $dumpAnalyses -Path $htmlPath -Days $Days
+New-TextReport -Context $context -Assessment $assessment -Bugchecks $bugchecks -Related $related -Dumps $dumpsForReport -Changes $changes -DumpConfig $dumpConfig -DumpAnalyses $dumpAnalyses -Path $txtPath -Days $Days
+$aiText = New-AiPasteReport -Context $context -Assessment $assessment -Bugchecks $bugchecks -Related $related -Dumps $dumpsForReport -Changes $changes -DumpConfig $dumpConfig -DumpAnalyses $dumpAnalyses -Path $aiPath -Days $Days
 
 [PSCustomObject]@{
     Context      = $context
@@ -1676,14 +2023,26 @@ foreach ($d in @($existingDumps | Select-Object -First 5)) {
     }
 }
 
+$clipboardOk = $false
+if (-not $SkipClipboard) {
+    $clipboardOk = Copy-TextToClipboardSafe -Text $aiText
+}
+
 Write-Section 'Report ready'
 Write-Info "Folder : $OutputDirectory" 'Green'
 Write-Info "HTML   : $htmlPath" 'Green'
 Write-Info "Text   : $txtPath" 'Green'
+Write-Info "AI paste: $aiPath" 'Green'
 Write-Info "JSON   : $jsonPath"
 Write-Info "Dumps copied: $copied | WinDbg logs under: $(Join-Path $OutputDirectory 'windbg')"
 Write-Host ""
-Write-Info 'Share the whole BSOD-RCA-* folder (HTML + dumps + windbg) with whoever is helping.' 'Cyan'
+if ($clipboardOk) {
+    Write-Info 'PASTE-INTO-COPILOT.txt is on the clipboard. Open Copilot and paste (Ctrl+V).' 'Cyan'
+}
+else {
+    Write-Info 'Open PASTE-INTO-COPILOT.txt, Select All, Copy, then paste into Copilot.' 'Cyan'
+}
+Write-Info 'Share the whole BSOD-RCA-* folder (HTML + paste file + dumps + windbg) when escalating.' 'Cyan'
 
 if ($OpenReport -and (Test-Path $htmlPath)) { Start-Process $htmlPath }
 
@@ -1691,6 +2050,7 @@ if ($OpenReport -and (Test-Path $htmlPath)) { Start-Process $htmlPath }
     OutputDirectory = $OutputDirectory
     HtmlReport      = $htmlPath
     TextReport      = $txtPath
+    AiPasteReport   = $aiPath
     Assessment      = $assessment
     DumpAnalyses    = $dumpAnalyses
     Bugchecks       = $bugchecks
