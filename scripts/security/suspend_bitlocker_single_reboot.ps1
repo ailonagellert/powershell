@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Suspends BitLocker on the system drive for a single reboot.
 

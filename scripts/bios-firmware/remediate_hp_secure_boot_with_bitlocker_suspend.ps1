@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Remediates HP Secure Boot and manages BitLocker suspension.
 

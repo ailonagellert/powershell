@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Optimizes Lenovo BIOS Boot Order for local disk priority.
 

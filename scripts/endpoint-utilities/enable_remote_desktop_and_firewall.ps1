@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Enables Remote Desktop and updates Firewall rules.
 

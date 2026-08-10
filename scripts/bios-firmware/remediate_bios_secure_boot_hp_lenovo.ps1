@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Remediates BIOS Secure Boot and Boot Order for HP and Lenovo systems.
 
@@ -28,7 +29,7 @@ function Enable-HP-SecureBoot {
     (Get-WmiObject -Namespace root/hp/instrumentedBIOS -Class HP_BIOSSettingInterface).SetBIOSSetting($Name, $Value)
 }
 
-function Check-HP-SecureBoot {
+function Test-HPSecureBoot {
     $updated = $false
     $sb = Get-WmiObject -Namespace root/hp/instrumentedBIOS -Class HP_BIOSSetting | Where-Object { $_.Name -match "Secure Boot" }
     foreach ($setting in $sb) {
@@ -45,7 +46,7 @@ function Check-HP-SecureBoot {
     return $updated
 }
 
-function Check-Lenovo-SecureBoot {
+function Test-LenovoSecureBoot {
     $sb = Get-WmiObject -Namespace root\wmi -Class Lenovo_BiosSetting | Where-Object { $_.CurrentSetting -match "SecureBoot" }
     if ($sb) {
         $val = $sb.CurrentSetting.Split(",")[1].Split(";")[0]
@@ -65,8 +66,8 @@ function Check-Lenovo-SecureBoot {
 # Main
 $m = Get-ComputerManufacturer
 $res = $false
-if ($m -match "HP|Hewlett") { $res = Check-HP-SecureBoot }
-elseif ($m -match "Lenovo") { $res = Check-Lenovo-SecureBoot }
+if ($m -match "HP|Hewlett") { $res = Test-HPSecureBoot }
+elseif ($m -match "Lenovo") { $res = Test-LenovoSecureBoot }
 
 if ($res -and -not $ReportOnly) {
     Suspend-BitLocker -MountPoint "C:" -RebootCount 1

@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Forces Windows Update and triggers an SCCM-managed reboot.
 

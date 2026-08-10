@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Restores public Windows Update connectivity by removing policy restrictions.
 

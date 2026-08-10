@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Advanced remediation for Hybrid Entra ID (Azure AD) Join errors.
 
@@ -19,7 +20,7 @@ param (
     [switch]$ReportOnly # Add a parameter to run in report only mode
 )
 # Function to check DeviceAuthStatus and extract error message if status is FAILED
-function Check-DeviceAuthStatus {
+function Test-DeviceAuthStatus {
     param (
         [string[]]$dsregStatus
     )
@@ -48,7 +49,7 @@ function Check-DeviceAuthStatus {
 }
 
 # New function to check DeviceAuthStatus in debug mode and extract additional debug info
-function Check-DeviceAuthStatusDebug {
+function Test-DeviceAuthStatusDebug {
     param (
         [string[]]$dsregStatus
     )
@@ -94,7 +95,7 @@ function Check-DeviceAuthStatusDebug {
 }
 
 # Function to attempt a rejoin if DeviceAuthStatus is ERROR or FAILED
-function Fix-HybridAzureADJoin {
+function Repair-HybridAzureADJoin {
     Write-Host "Attempting  fix... ."
 
     # Leave Azure AD Join
@@ -110,7 +111,7 @@ function Fix-HybridAzureADJoin {
 
     # Re-check the status after attempting the fix
     $dsregStatus = dsregcmd /status
-    $NewDeviceAuthStatus = Check-DeviceAuthStatus -dsregStatus $dsregStatus
+    $NewDeviceAuthStatus = Test-DeviceAuthStatus -dsregStatus $dsregStatus
 
     return $NewDeviceAuthStatus
 }
@@ -119,7 +120,7 @@ function Fix-HybridAzureADJoin {
 $dsregStatus = dsregcmd /status
 
 # Check the DeviceAuthStatus
-$DeviceAuthStatusResult = Check-DeviceAuthStatus -dsregStatus $dsregStatus
+$DeviceAuthStatusResult = Test-DeviceAuthStatus -dsregStatus $dsregStatus
 $DeviceAuthStatus = $DeviceAuthStatusResult.Status
 $ErrorMessage = $DeviceAuthStatusResult.Error
 
@@ -133,7 +134,7 @@ elseif ($DeviceAuthStatus -eq "FAILED") {
     if (-not $ReportOnly) {
         #Write-Host "Attempting to resolve issues..."
         # Attempt to fix the issue and re-check the status
-        $NewDeviceAuthStatusResult = Fix-HybridAzureADJoin
+        $NewDeviceAuthStatusResult = Repair-HybridAzureADJoin
         $NewDeviceAuthStatus = $NewDeviceAuthStatusResult.Status
         $NewErrorMessage = $NewDeviceAuthStatusResult.Error
 
@@ -146,7 +147,7 @@ elseif ($DeviceAuthStatus -eq "FAILED") {
             # Run in debug mode to collect additional info if the fix fails
             Write-Host "Collecting debug info... "
             $dsregStatusDebug = dsregcmd /status /debug
-            $DebugInfo = Check-DeviceAuthStatusDebug -dsregStatus $dsregStatusDebug
+            $DebugInfo = Test-DeviceAuthStatusDebug -dsregStatus $dsregStatusDebug
             Write-Host " Client ErrorCode: $($DebugInfo.ClientErrorCode) "
             Write-Host " Server ErrorCode: $($DebugInfo.ServerErrorCode) "
             Write-Host " Server ErrorSubCode: $($DebugInfo.ServerErrorSubCode) "
@@ -163,7 +164,7 @@ elseif ($DeviceAuthStatus -eq "FAILED") {
       $dsregStatus = dsregcmd /status
 
 # Check the DeviceAuthStatus
-$DeviceAuthStatusResult = Check-DeviceAuthStatus -dsregStatus $dsregStatus
+$DeviceAuthStatusResult = Test-DeviceAuthStatus -dsregStatus $dsregStatus
  $DeviceAuthStatusResult.Status
 }
 

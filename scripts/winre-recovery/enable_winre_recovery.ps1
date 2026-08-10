@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Checks and enables the Windows Recovery Environment (WinRE).
 

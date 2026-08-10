@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Comprehensive Lenovo BIOS settings management via WMI.
 

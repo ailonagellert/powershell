@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Forcefully uninstalls Adobe Acrobat Reader (Standard/Pro excluded).
 

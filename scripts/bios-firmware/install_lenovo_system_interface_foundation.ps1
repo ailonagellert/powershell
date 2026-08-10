@@ -1,4 +1,5 @@
-﻿<#
+﻿#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Downloads and silently installs Lenovo System Interface Foundation.
 
@@ -11,16 +12,19 @@
 .NOTES
 #>
 
-$url = "https://download.lenovo.com/pccbbs/mobiles/sif11ww203.exe"
-$dest = "C:\Windows\Temp\sif_installer.exe"
+[CmdletBinding()]
+param(
+    [string]$Url = "https://download.lenovo.com/pccbbs/mobiles/sif11ww203.exe",
+    [string]$Destination = "C:\Windows\Temp\sif_installer.exe"
+)
 
 Write-Host "Downloading Lenovo SIF..." -ForegroundColor Cyan
-Invoke-WebRequest -Uri $url -OutFile $dest
+Invoke-WebRequest -Uri $Url -OutFile $Destination
 
-if (Test-Path $dest) {
+if (Test-Path $Destination) {
     Write-Host "Installing silently..." -ForegroundColor Green
-    $process = Start-Process -FilePath $dest -ArgumentList "/verysilent", "/norestart" -Wait -PassThru
-    Remove-Item $dest -Force
+    $process = Start-Process -FilePath $Destination -ArgumentList "/verysilent", "/norestart" -Wait -PassThru
+    Remove-Item $Destination -Force
     exit $process.ExitCode
 } else {
     Write-Error "Download failed."

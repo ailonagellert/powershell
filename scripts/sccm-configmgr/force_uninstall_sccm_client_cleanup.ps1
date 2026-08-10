@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Forcefully uninstalls and purges the SCCM (ConfigMgr) client.
 

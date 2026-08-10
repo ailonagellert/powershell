@@ -1,4 +1,5 @@
-﻿<#
+﻿#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Professional Dell BIOS Management via PowerShell Module.
 
@@ -14,6 +15,10 @@
        ports.
 
 .NOTES
+    Dell manage trio (kept intentionally — different APIs / settings catalogs):
+      manage_dell_bios_settings_wmi.ps1    — WMI root\dcim\sysman (no DellBIOSProvider)
+      manage_dell_bios_settings_pro.ps1    — full DellBIOSProvider orchestrator (this file)
+      manage_dell_bios_settings_module.ps1 — lighter DellBIOSProvider variant (do not wrap; settings lists differ)
     Original Filename: AutoSaved_17a27dda-9630-467a-a913-a507102c3cd5_Untitled598.ps1
     Author: Jon Anderson (ConfigJon)
 #>

@@ -1,14 +1,15 @@
-﻿<#
+﻿#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Remediates Windows Update policy sources to enable Microsoft Update.
 
 .DESCRIPTION
-    An Intune Remediation script that ensures the 'SetPolicyDrivenUpdateSource' 
+    An Intune Remediation script that ensures the 'SetPolicyDrivenUpdateSource'
     registry keys are set to 0.
-    This configuration forces the device to check for Quality, Driver, and 
-    Feature updates directly from Microsoft Update/WUfB rather than a 
+    This configuration forces the device to check for Quality, Driver, and
+    Feature updates directly from Microsoft Update/WUfB rather than a
     local WSUS or SCCM endpoint.
-    
+
     Actions:
     - Creates missing registry paths.
     - Sets values to 0 if they differ or are missing.
@@ -16,9 +17,14 @@
     - Triggers an immediate 'UsoClient StartScan'.
 
 .NOTES
+    Wrapper alias: remediate_windows_update_source_policies.ps1
 #>
 
-$registryPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+[CmdletBinding()]
+param(
+    [string]$RegistryPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+)
+
 $registryValues = @(
     "SetPolicyDrivenUpdateSourceForQualityUpdates",
     "SetPolicyDrivenUpdateSourceForDriverUpdates",
@@ -26,15 +32,15 @@ $registryValues = @(
     "SetPolicyDrivenUpdateSourceForFeatureUpdates"
 )
 
-if (-not (Test-Path $registryPath)) { New-Item $registryPath -Force | Out-Null }
+if (-not (Test-Path $RegistryPath)) { New-Item $RegistryPath -Force | Out-Null }
 
 $remediated = $false
 
 foreach ($value in $registryValues) {
-    $current = Get-ItemProperty -Path $registryPath -Name $value -ErrorAction SilentlyContinue
+    $current = Get-ItemProperty -Path $RegistryPath -Name $value -ErrorAction SilentlyContinue
     if ($null -eq $current -or $current.$value -ne 0) {
         Write-Output "Remediating $value to 0..."
-        Set-ItemProperty -Path $registryPath -Name $value -Value 0
+        Set-ItemProperty -Path $RegistryPath -Name $value -Value 0 -Type DWord
         $remediated = $true
     }
 }

@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Ensures critical Workplace Join scheduled tasks are enabled.
 

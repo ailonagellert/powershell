@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Forces Windows Update to scan and install driver updates via a GUI.
 

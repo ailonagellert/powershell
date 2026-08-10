@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Configures Secure Boot and Boot Order for HP and Lenovo systems.
 
@@ -72,7 +73,7 @@ function Enable-Lenovo-SecureBoot {
 }
 
 # Function to check and enable Secure Boot on HP systems
-function Check-HP-SecureBoot {
+function Test-HPSecureBoot {
     $settingUpdated = $false
 
     # Check for Secure Boot setting first
@@ -126,7 +127,7 @@ function Check-HP-SecureBoot {
 }
 
 # Function to check and enable Secure Boot on Lenovo systems
-function Check-Lenovo-SecureBoot {
+function Test-LenovoSecureBoot {
     $secureBootSetting = Get-WmiObject -Namespace root\wmi -Class Lenovo_BiosSetting | Where-Object { $_.CurrentSetting -match "SecureBoot" -or $_.CurrentSetting -match "Secure Boot"}
     $bootorder = (Get-WmiObject -Class Lenovo_BiosSetting -Namespace root\wmi | Where-Object { $_.CurrentSetting -imatch "BootOrder," -or $_.CurrentSetting -match "PrimaryBootSequence,"} ).CurrentSetting
 
@@ -140,7 +141,7 @@ function Check-Lenovo-SecureBoot {
         
         if (-not $ReportOnly -and $currentValue -match "Disabled|Disable") {
             if ($bootorder) {
-                Check-BootOrderCompliance -CurrentBootOrder $bootorder
+                Test-BootOrderCompliance -CurrentBootOrder $bootorder
             }
             
             $target = if ($currentValue -eq "Disable") { "Enable" } else { "Enabled" }
@@ -157,7 +158,7 @@ function Check-Lenovo-SecureBoot {
 }
 
 # Function to reorder boot priority
-function Reorder-BootOrder {
+function Set-PreferredBootOrder {
     param (
         [string]$CurrentBootOrder
     )
@@ -189,7 +190,7 @@ function Reorder-BootOrder {
 }
 
 # Function to check boot order compliance
-function Check-BootOrderCompliance {
+function Test-BootOrderCompliance {
     param (
         [string]$CurrentBootOrder
     )
@@ -205,7 +206,7 @@ function Check-BootOrderCompliance {
         Write-Host "Non-Compliant: $CurrentBootOrder"
         if (-not $ReportOnly) {
             Write-Host "Reordering boot order..."
-            $reorderedBootOrder = Reorder-BootOrder -CurrentBootOrder $CurrentBootOrder
+            $reorderedBootOrder = Set-PreferredBootOrder -CurrentBootOrder $CurrentBootOrder
             return $reorderedBootOrder
         }
     }
@@ -216,9 +217,9 @@ $manufacturer = Get-ComputerManufacturer
 $settingUpdated = $false
 
 if ($manufacturer -match "HP" -or $manufacturer -match "Hewlett-Packard") {
-    $settingUpdated = Check-HP-SecureBoot
+    $settingUpdated = Test-HPSecureBoot
 } elseif ($manufacturer -match "Lenovo") {
-    $settingUpdated = Check-Lenovo-SecureBoot
+    $settingUpdated = Test-LenovoSecureBoot
 } else {
     Write-Host "This script is only designed for HP and Lenovo systems."
     exit

@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Multi-vendor (HP/Lenovo) Secure Boot and Boot Order remediator.
 
@@ -16,6 +17,7 @@
     - ReportOnly mode: Validates compliance without making changes.
 
 .NOTES
+    Kept as variant: Lenovo SecureBoot uses $settingname,Enabled (not DeviceGuard). Prefer remediate_secure_boot_hp_lenovo_integrated.ps1 when DeviceGuard + BitLocker suspend is desired.
     Original Filename: AutoSaved_5bbe3a7f-f13c-43f8-9dd2-9df5316b8d07_Untitled611.ps1
 #>
 
@@ -49,7 +51,7 @@ function Enable-HP-SecureBoot {
 
 
 # Function to check and enable Secure Boot on HP systems
-function Check-HP-SecureBoot {
+function Test-HPSecureBoot {
     $settingUpdated = $false
 
     # Check for Secure Boot setting first
@@ -105,7 +107,7 @@ function Check-HP-SecureBoot {
     return $settingUpdated
 }
 
-function Check-Lenovo-SecureBoot {
+function Test-LenovoSecureBoot {
     $secureBootSetting = Get-WmiObject -Namespace root\wmi -Class Lenovo_BiosSetting | Where-Object { $_.CurrentSetting -match "SecureBoot" -or $_.CurrentSetting -match "Secure Boot"}
     $bootorder = (Get-WmiObject -Class Lenovo_BiosSetting -Namespace root\wmi | Where-Object { $_.CurrentSetting -imatch "BootOrder," -or $_.CurrentSetting -match "PrimaryBootSequence,"} ).CurrentSetting
 
@@ -120,7 +122,7 @@ function Check-Lenovo-SecureBoot {
         if (-not $ReportOnly -and $currentValue -match "Disabled|Disable" -and $availableOptions -match "Enabled|Disable") {
             Write-Host "Lenovo Secure Boot is set to: $currentValue"
            if ($bootorder) {
-                Check-BootOrderCompliance -CurrentBootOrder $bootorder
+                Test-BootOrderCompliance -CurrentBootOrder $bootorder
             }
            if ($currentValue -eq "Disable") {
             Enable-Lenovo-SecureBoot "$settingname,Enabled"
@@ -172,7 +174,7 @@ function Enable-Lenovo-SecureBoot {
 }
 
 
- function Reorder-BootOrder {
+ function Set-PreferredBootOrder {
     param (
         [string]$CurrentBootOrder
     )
@@ -205,7 +207,7 @@ function Enable-Lenovo-SecureBoot {
 }
 
 # Function to check compliance
-function Check-BootOrderCompliance {
+function Test-BootOrderCompliance {
     param (
         [string]$CurrentBootOrder
     )
@@ -222,7 +224,7 @@ function Check-BootOrderCompliance {
         Write-Host "Non-Compliant: $CurrentBootOrder"
         if (-not $ReportOnly) {
         Write-Host "Reordering boot order..."
-        $reorderedBootOrder = Reorder-BootOrder -CurrentBootOrder $CurrentBootOrder
+        $reorderedBootOrder = Set-PreferredBootOrder -CurrentBootOrder $CurrentBootOrder
         Write-Host "Updated BootOrder: $reorderedBootOrder"
         return $true
     }
@@ -238,9 +240,9 @@ $settingUpdated = $false
 #Write-Host "Detected manufacturer: $manufacturer"
 
 if ($manufacturer -match "HP" -or $manufacturer -match "Hewlett-Packard") {
-    $settingUpdated = Check-HP-SecureBoot
+    $settingUpdated = Test-HPSecureBoot
 } elseif ($manufacturer -match "Lenovo") {
-    $settingUpdated = Check-Lenovo-SecureBoot
+    $settingUpdated = Test-LenovoSecureBoot
 } else {
     Write-Host "This script is only designed for HP and Lenovo systems."
     exit
@@ -248,14 +250,9 @@ if ($manufacturer -match "HP" -or $manufacturer -match "Hewlett-Packard") {
 
 # Suspend BitLocker and reboot if changes were made (only in non-report mode)
 if (-not $ReportOnly -and $settingUpdated -eq $true) {
-    #Suspend-BitLocker -MountPoint "C:" -RebootCount 1 | Out-Null
-    Write-Host "BL suspended"
-    #Write-Host "Rebooting to apply changes..."
-   # msg * "The system will restart in 1 minute to apply BIOS changes. Please save your work."
-    #n
-    #Start-Sleep -Seconds 60
-   # & shutdown /r /f /t 60
-    #exit-pssession
-    #exit 3010
+    Suspend-BitLocker -MountPoint "C:" -RebootCount 1 | Out-Null
+    Write-Host "BitLocker suspended on C: drive."
+    Write-Host "BIOS changes applied; reboot required (exit 3010)."
+    exit 3010
 }
 

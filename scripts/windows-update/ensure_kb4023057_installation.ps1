@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Ensures KB4023057 is installed to maintain Windows Update health.
 

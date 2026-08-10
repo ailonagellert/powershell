@@ -1,4 +1,5 @@
-﻿<#
+﻿#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Manages Dell BIOS settings using the DellBIOSProvider module.
 
@@ -27,6 +28,10 @@
     Custom path for the log file.
 
 .NOTES
+    Dell manage trio (kept intentionally — different APIs / settings catalogs):
+      manage_dell_bios_settings_wmi.ps1    — WMI root\dcim\sysman (no DellBIOSProvider)
+      manage_dell_bios_settings_pro.ps1    — full DellBIOSProvider orchestrator (prefer for new work)
+      manage_dell_bios_settings_module.ps1 — lighter DellBIOSProvider variant (this file; smaller settings list)
     Author: Jon Anderson (@ConfigJon)
 #>
 

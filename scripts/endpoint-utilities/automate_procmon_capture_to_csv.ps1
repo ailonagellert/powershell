@@ -13,16 +13,24 @@
 .NOTES
 #>
 
-$procmon = "C:\Windows\System32\Procmon.exe"
-$pml = "C:\Windows\Temp\Capture.pml"
-$csv = "C:\Windows\Temp\$($env:COMPUTERNAME)_ProcMon.csv"
+[CmdletBinding()]
+param(
+    [string]$ProcmonPath = "C:\Windows\System32\Procmon.exe",
+    [string]$PmlPath = "C:\Windows\Temp\Capture.pml",
+    [string]$CsvPath = "C:\Windows\Temp\$($env:COMPUTERNAME)_ProcMon.csv",
+    [int]$RuntimeSeconds = 900
+)
+
+$procmon = $ProcmonPath
+$pml = $PmlPath
+$csv = $CsvPath
 
 # 1. Start Capture
-Write-Host "Starting ProcMon capture (15m)..." -ForegroundColor Cyan
-& $procmon /Runtime 900 /Quiet /Minimized /BackingFile $pml
+Write-Host "Starting ProcMon capture (${RuntimeSeconds}s)..." -ForegroundColor Cyan
+& $procmon /Runtime $RuntimeSeconds /Quiet /Minimized /BackingFile $pml
 
 # 2. Wait
-Start-Sleep -Seconds 960
+Start-Sleep -Seconds ($RuntimeSeconds + 60)
 
 # 3. Terminate & Export
 Write-Host "Terminating and exporting to CSV..." -ForegroundColor Yellow

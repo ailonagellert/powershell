@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Resizes the system partition and recreates an 800MB Windows Recovery (WinRE) partition.
 

@@ -1,4 +1,5 @@
-﻿<#
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     GUI-enhanced tool to force Windows Update and Driver updates.
 

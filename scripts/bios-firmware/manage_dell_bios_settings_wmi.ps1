@@ -1,4 +1,5 @@
-﻿<#
+﻿#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
     Professional Dell BIOS settings orchestrator using WMI.
 
@@ -14,6 +15,10 @@
     - Detects active Task Sequence environments.
 
 .NOTES
+    Dell manage trio (kept intentionally — different APIs / settings catalogs):
+      manage_dell_bios_settings_wmi.ps1    — WMI root\dcim\sysman (this file; no DellBIOSProvider)
+      manage_dell_bios_settings_pro.ps1    — full DellBIOSProvider orchestrator
+      manage_dell_bios_settings_module.ps1 — lighter DellBIOSProvider variant
     Original Author: Jon Anderson (@ConfigJon)
     Reference: https://www.configjon.com/dell-bios-settings-management-wmi/
     Original Filename: AutoSaved_491d9ac7-1fc9-4920-8d35-ab0b1a999b9f_Untitled599.ps1
