@@ -113,8 +113,84 @@ function Get-ShortText {
 
 function Get-Array {
     param($InputObject)
-    if ($null -eq $InputObject) { return @() }
-    return @($InputObject)
+    # Leading comma prevents PowerShell from unwrapping a single-element array on return
+    if ($null -eq $InputObject) { return , @() }
+    return , @($InputObject)
+}
+
+function Get-ReportRootDirectory {
+    # Elevated sessions often resolve Desktop to C:\Users\Default\Desktop - prefer the interactive user's Desktop
+    $candidates = New-Object System.Collections.Generic.List[string]
+    try {
+        $explorer = Get-CimInstance Win32_Process -Filter "Name = 'explorer.exe'" -ErrorAction SilentlyContinue |
+            Sort-Object CreationDate | Select-Object -First 1
+        if ($explorer) {
+            $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction SilentlyContinue
+            if ($owner -and $owner.User -and $owner.User -notin @('Default', 'DefaultUser', 'Public')) {
+                [void]$candidates.Add((Join-Path (Join-Path 'C:\Users' $owner.User) 'Desktop'))
+            }
+        }
+    }
+    catch { }
+
+    if ($env:USERPROFILE -and $env:USERNAME -notin @('SYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE', 'DefaultAccount')) {
+        [void]$candidates.Add((Join-Path $env:USERPROFILE 'Desktop'))
+    }
+    [void]$candidates.Add([Environment]::GetFolderPath('CommonDesktopDirectory'))
+    [void]$candidates.Add([Environment]::GetFolderPath('Desktop'))
+    [void]$candidates.Add((Join-Path $env:PUBLIC 'Desktop'))
+    [void]$candidates.Add($env:TEMP)
+
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+    }
+    return $env:TEMP
+}
+
+function Convert-BugcheckToHex {
+    param($Value)
+    # Stop codes are 32-bit. Use Convert-BugcheckParamToHex for bugcheck parameters (often 64-bit pointers).
+    if ($null -eq $Value -or $Value -eq '') { return $null }
+    $s = ([string]$Value).Trim()
+    if ($s -match '[\\/]' -or $s -match '\.dmp$' -or $s -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-') { return $null }
+    try {
+        if ($s -match '^0x') {
+            $hex = $s.Substring(2)
+            if ($hex.Length -gt 8) { $hex = $hex.Substring($hex.Length - 8) } # take low 32 bits if wider
+            return ('0x{0:X8}' -f [Convert]::ToUInt32($hex, 16))
+        }
+        if ($s -match '^\d+$') { return ('0x{0:X8}' -f [uint32]$s) }
+        if ($s -match '^[0-9A-Fa-f]+$') {
+            $hex = $s
+            if ($hex.Length -gt 8) { $hex = $hex.Substring($hex.Length - 8) }
+            return ('0x{0:X8}' -f [Convert]::ToUInt32($hex, 16))
+        }
+        return $null
+    }
+    catch {
+        if ($s -match '0x([0-9A-Fa-f]+)') {
+            try {
+                $hex = $Matches[1]
+                if ($hex.Length -gt 8) { $hex = $hex.Substring($hex.Length - 8) }
+                return ('0x{0:X8}' -f [Convert]::ToUInt32($hex, 16))
+            }
+            catch { return $null }
+        }
+        return $null
+    }
+}
+
+function Convert-BugcheckParamToHex {
+    param($Value)
+    if ($null -eq $Value -or $Value -eq '') { return $null }
+    $s = ([string]$Value).Trim()
+    if ($s -match '[\\/]' -or $s -match '\.dmp$' -or $s -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-') { return $null }
+    if ($s -match '^0[xX]([0-9A-Fa-f]+)$') { return '0x' + $Matches[1].ToUpperInvariant() }
+    if ($s -match '^[0-9A-Fa-f]+$') { return '0x' + $s.ToUpperInvariant() }
+    if ($s -match '^\d+$') {
+        try { return ('0x{0:X}' -f [uint64]$s) } catch { return $null }
+    }
+    return $null
 }
 
 function Write-Section {
@@ -137,19 +213,6 @@ function Get-SafeWinEvent {
     }
     catch {
         return @()
-    }
-}
-
-function Convert-BugcheckToHex {
-    param($Value)
-    if ($null -eq $Value -or $Value -eq '') { return $null }
-    try {
-        return ('0x{0:X8}' -f [uint32]$Value)
-    }
-    catch {
-        $s = [string]$Value
-        if ($s -match '0x[0-9A-Fa-f]+') { return ($Matches[0] -replace '^0X', '0x') }
-        return $s
     }
 }
 
@@ -229,39 +292,71 @@ function Get-EventPropertyMap {
 function Parse-BugcheckFromEvent {
     param($Event)
     $props = Get-EventPropertyMap -Event $Event
-    $code = $null; $p1 = $null; $p2 = $null; $p3 = $null; $p4 = $null; $dump = $null
+    $code = $null; $p1 = $null; $p2 = $null; $p3 = $null; $p4 = $null; $dump = $null; $reportId = $null
 
     if ($props.ContainsKey('BugcheckCode')) { $code = Convert-BugcheckToHex $props['BugcheckCode'] }
     elseif ($props.ContainsKey('BugCheckCode')) { $code = Convert-BugcheckToHex $props['BugCheckCode'] }
 
-    foreach ($key in @('BugcheckParameter1', 'Param1', 'Parameter1')) { if ($props.ContainsKey($key)) { $p1 = Convert-BugcheckToHex $props[$key]; break } }
-    foreach ($key in @('BugcheckParameter2', 'Param2', 'Parameter2')) { if ($props.ContainsKey($key)) { $p2 = Convert-BugcheckToHex $props[$key]; break } }
-    foreach ($key in @('BugcheckParameter3', 'Param3', 'Parameter3')) { if ($props.ContainsKey($key)) { $p3 = Convert-BugcheckToHex $props[$key]; break } }
-    foreach ($key in @('BugcheckParameter4', 'Param4', 'Parameter4')) { if ($props.ContainsKey($key)) { $p4 = Convert-BugcheckToHex $props[$key]; break } }
-    foreach ($key in @('DumpFile', 'DumpPath')) { if ($props.ContainsKey($key) -and $props[$key]) { $dump = $props[$key]; break } }
+    # True BugCheck provider parameters (not WER param1/param2 which are code/path/report-id)
+    foreach ($key in @('BugcheckParameter1', 'BugCheckParameter1')) { if ($props.ContainsKey($key)) { $p1 = Convert-BugcheckParamToHex $props[$key]; break } }
+    foreach ($key in @('BugcheckParameter2', 'BugCheckParameter2')) { if ($props.ContainsKey($key)) { $p2 = Convert-BugcheckParamToHex $props[$key]; break } }
+    foreach ($key in @('BugcheckParameter3', 'BugCheckParameter3')) { if ($props.ContainsKey($key)) { $p3 = Convert-BugcheckParamToHex $props[$key]; break } }
+    foreach ($key in @('BugcheckParameter4', 'BugCheckParameter4')) { if ($props.ContainsKey($key)) { $p4 = Convert-BugcheckParamToHex $props[$key]; break } }
 
-    if (-not $code -and $Event.Message) {
-        if ($Event.Message -match 'bugcheck was:\s*(0x[0-9A-Fa-f]+)') { $code = Convert-BugcheckToHex $Matches[1] }
-        elseif ($Event.Message -match '(0x[0-9A-Fa-f]{8})') { $code = Convert-BugcheckToHex $Matches[1] }
+    foreach ($key in @('DumpFile', 'DumpPath')) {
+        if ($props.ContainsKey($key) -and "$($props[$key])" -match '\.dmp') { $dump = "$($props[$key])".Trim(); break }
     }
-    if (-not $dump -and $Event.Message -match 'Dump file:\s*(.+?\.dmp)') { $dump = $Matches[1].Trim() }
+
+    # WER SystemErrorReporting Event 1001: param1=stop code, param2=dump path, param3=report id
+    foreach ($key in @('param1', 'Param1')) {
+        if (-not $code -and $props.ContainsKey($key)) { $code = Convert-BugcheckToHex $props[$key] }
+    }
+    foreach ($key in @('param2', 'Param2')) {
+        if (-not $dump -and $props.ContainsKey($key) -and "$($props[$key])" -match '\.dmp') { $dump = "$($props[$key])".Trim() }
+    }
+    foreach ($key in @('param3', 'Param3')) {
+        if ($props.ContainsKey($key) -and "$($props[$key])" -match '^[0-9a-fA-F-]{16,}$') { $reportId = "$($props[$key])".Trim() }
+    }
+
+    # Prefer authoritative values from the message text when present
+    if ($Event.Message) {
+        if ($Event.Message -match '(?i)bugcheck was:\s*(0x[0-9A-Fa-f]+)\s*\(([^)]*)\)') {
+            $code = Convert-BugcheckToHex $Matches[1]
+            $parts = @($Matches[2] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            if ($parts.Count -ge 1) { $p1 = Convert-BugcheckParamToHex $parts[0] }
+            if ($parts.Count -ge 2) { $p2 = Convert-BugcheckParamToHex $parts[1] }
+            if ($parts.Count -ge 3) { $p3 = Convert-BugcheckParamToHex $parts[2] }
+            if ($parts.Count -ge 4) { $p4 = Convert-BugcheckParamToHex $parts[3] }
+        }
+        elseif (-not $code -and $Event.Message -match '(?i)bugcheck was:\s*(0x[0-9A-Fa-f]+)') {
+            $code = Convert-BugcheckToHex $Matches[1]
+        }
+
+        if (-not $dump -and $Event.Message -match '(?i)(?:Dump file:|dump was saved in:)\s*(.+?\.dmp)') {
+            $dump = $Matches[1].Trim().TrimEnd('.', ',', ';')
+        }
+        if (-not $reportId -and $Event.Message -match '(?i)Report Id:\s*([0-9a-fA-F-]{16,})') {
+            $reportId = $Matches[1].Trim()
+        }
+    }
 
     $info = Resolve-BugcheckInfo -CodeHex $code
     return [PSCustomObject]@{
-        TimeCreated          = $Event.TimeCreated
-        Computer             = $Event.MachineName
-        BugcheckCode         = $code
-        BugcheckName         = $info.Name
-        Category             = $info.Category
-        Parameter1           = $p1
-        Parameter2           = $p2
-        Parameter3           = $p3
-        Parameter4           = $p4
-        DumpFile             = $dump
-        LikelyCause          = $info.Likely
-        RecommendedActions   = ($info.Actions -join ' | ')
-        Message              = $Event.Message
-        KnownCode            = [bool]$info.Known
+        TimeCreated        = $Event.TimeCreated
+        Computer           = $Event.MachineName
+        BugcheckCode       = $code
+        BugcheckName       = $info.Name
+        Category           = $info.Category
+        Parameter1         = $p1
+        Parameter2         = $p2
+        Parameter3         = $p3
+        Parameter4         = $p4
+        DumpFile           = $dump
+        ReportId           = $reportId
+        LikelyCause        = $info.Likely
+        RecommendedActions = ($info.Actions -join ' | ')
+        Message            = $Event.Message
+        KnownCode          = [bool]$info.Known
     }
 }
 #endregion Helpers
@@ -315,20 +410,71 @@ function Get-CrashDumpConfiguration {
 }
 
 function Get-DumpInventory {
+    param(
+        [string[]]$ExtraPaths = @(),
+        [string]$MinidumpDir = 'C:\Windows\Minidump'
+    )
+
     $files = New-Object System.Collections.Generic.List[object]
-    foreach ($pattern in @('C:\Windows\Minidump\*.dmp', 'C:\Windows\MEMORY.DMP', 'C:\Windows\LiveKernelReports\*.dmp')) {
-        Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue | ForEach-Object {
-            [void]$files.Add([PSCustomObject]@{
-                FullName      = $_.FullName
-                Name          = $_.Name
-                LengthMB      = [math]::Round($_.Length / 1MB, 2)
-                LastWriteTime = $_.LastWriteTime
-                AgeDays       = [math]::Round(((Get-Date) - $_.LastWriteTime).TotalDays, 1)
-                IsMinidump    = ($_.DirectoryName -match 'Minidump|LiveKernelReports' -or $_.Length -lt 256MB)
-            })
+    $seen = @{}
+
+    function Add-DumpFile {
+        param([System.IO.FileInfo]$File)
+        if (-not $File -or -not $File.FullName) { return }
+        $key = $File.FullName.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { return }
+        $seen[$key] = $true
+        [void]$files.Add([PSCustomObject]@{
+            FullName      = $File.FullName
+            Name          = $File.Name
+            LengthMB      = [math]::Round($File.Length / 1MB, 2)
+            LastWriteTime = $File.LastWriteTime
+            AgeDays       = [math]::Round(((Get-Date) - $File.LastWriteTime).TotalDays, 1)
+            IsMinidump    = ($File.DirectoryName -match 'Minidump|LiveKernelReports|WER' -or $File.Length -lt 256MB)
+            Exists        = $true
+        })
+    }
+
+    $patterns = @(
+        (Join-Path $MinidumpDir '*.dmp'),
+        'C:\Windows\Minidump\*.dmp',
+        'C:\Windows\MEMORY.DMP',
+        'C:\Windows\LiveKernelReports\*.dmp',
+        (Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportArchive\*\*.dmp'),
+        (Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportArchive\*\*.mdmp'),
+        (Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportQueue\*\*.dmp'),
+        (Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportQueue\*\*.mdmp')
+    )
+
+    foreach ($pattern in $patterns) {
+        Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue | ForEach-Object { Add-DumpFile -File $_ }
+    }
+
+    foreach ($path in $ExtraPaths) {
+        if ([string]::IsNullOrWhiteSpace($path)) { continue }
+        $clean = $path.Trim().TrimEnd('.', ',', ';', '"')
+        if (Test-Path -LiteralPath $clean) {
+            Add-DumpFile -File (Get-Item -LiteralPath $clean -ErrorAction SilentlyContinue)
+        }
+        else {
+            # Still record the reported path so the report shows it was expected but missing
+            $key = $clean.ToLowerInvariant()
+            if (-not $seen.ContainsKey($key)) {
+                $seen[$key] = $true
+                [void]$files.Add([PSCustomObject]@{
+                    FullName      = $clean
+                    Name          = Split-Path $clean -Leaf
+                    LengthMB      = $null
+                    LastWriteTime = $null
+                    AgeDays       = $null
+                    IsMinidump    = ($clean -match 'Minidump|\.dmp$')
+                    Exists        = $false
+                })
+            }
         }
     }
-    return @($files | Sort-Object LastWriteTime -Descending)
+
+    return , @($files | Sort-Object @{ Expression = 'Exists'; Descending = $true }, LastWriteTime -Descending)
 }
 
 function Get-BugcheckEvents {
@@ -345,7 +491,7 @@ function Get-BugcheckEvents {
             if ($e.Message -match 'bugcheck|0x[0-9A-Fa-f]{8}') { [void]$parsed.Add((Parse-BugcheckFromEvent -Event $e)) }
         }
     }
-    return @($parsed | Sort-Object TimeCreated -Descending)
+    return , @($parsed | Sort-Object TimeCreated -Descending)
 }
 
 function Get-RelatedCrashEvents {
@@ -366,7 +512,7 @@ function Get-RelatedCrashEvents {
     foreach ($e in (Get-SafeWinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'disk'; StartTime = $Start } -MaxEvents ([Math]::Min(15, $MaxEvents)) | Where-Object { $_.LevelDisplayName -in @('Error', 'Warning') })) {
         [void]$rows.Add([PSCustomObject]@{ TimeCreated = $e.TimeCreated; Type = "Disk Error/Warning (Event $($e.Id))"; Provider = $e.ProviderName; Id = $e.Id; Summary = 'Storage subsystem reported an error near the analysis window.'; Message = Get-ShortText $e.Message })
     }
-    return @($rows | Sort-Object TimeCreated -Descending)
+    return , @($rows | Sort-Object TimeCreated -Descending)
 }
 
 function Get-RecentDriverAndSoftwareChanges {
@@ -391,7 +537,7 @@ function Get-RecentDriverAndSoftwareChanges {
         }
     }
     catch { }
-    return @($changes | Sort-Object TimeCreated -Descending)
+    return , @($changes | Sort-Object TimeCreated -Descending)
 }
 #endregion Collection
 
@@ -469,7 +615,7 @@ function Invoke-WingetInstall {
             '--accept-package-agreements', '--accept-source-agreements',
             '--disable-interactivity'
         )
-        $p = Start-Process -FilePath $winget -ArgumentList $args -Wait -PassThru -NoNewWindow -WindowStyle Hidden
+        $p = Start-Process -FilePath $winget -ArgumentList $args -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
         Write-Info "winget exit code for ${PackageId}: $($p.ExitCode)" 'Gray'
         # 0 = installed, -1978335189 / other success-ish codes may mean already installed
         return ($p.ExitCode -eq 0 -or $p.ExitCode -eq -1978335189 -or $p.ExitCode -eq -1978335135)
@@ -519,8 +665,68 @@ function Install-DumpDebugger {
     return $null
 }
 
+function Get-BugcheckCodeFromDumpPath {
+    param([string]$DumpPath)
+    if ([string]::IsNullOrWhiteSpace($DumpPath)) { return $null }
+    # WER folders look like: Kernel_124_... or Kernel_1b0_... or Kernel_7e_...
+    if ($DumpPath -match '(?i)[/\\]Kernel_([0-9a-fA-F]+)[_/\\]') {
+        try {
+            return ('0x{0:X8}' -f [Convert]::ToUInt32($Matches[1], 16))
+        }
+        catch { }
+    }
+    if ($DumpPath -match '(?i)[/\\](WHEA|WATCHDOG|BUGCHECK|LIVEKERNEL)-') {
+        # filename hint only; caller may still lack a code
+        return $null
+    }
+    return $null
+}
+
+function Test-IsLiveKernelDumpName {
+    param([string]$Name, [string]$FullName = '')
+    $n = "$Name $FullName"
+    return [bool]($n -match '(?i)(^|[\\/])(WHEA|WATCHDOG)-' -or $n -match '(?i)\\LiveKernelReports\\' -or $n -match '(?i)LKD_')
+}
+
+function Get-CleanFaultingModule {
+    param(
+        [string]$Module,
+        [string]$Driver,
+        [string]$ProbablyCausedBy,
+        [string]$FailureBucket
+    )
+
+    $candidates = @($Module, $Driver, $ProbablyCausedBy) | Where-Object { $_ -and $_.Trim() }
+    $junk = @(
+        'memory_corruption', 'MEMORY_CORRUPTION', 'Analysis', 'Unknown', 'nt', 'ntoskrnl',
+        'ntkrnlmp.exe', 'ntoskrnl.exe', 'Unknown_Module', 'followup'
+    )
+
+    foreach ($c in $candidates) {
+        $clean = ($c -replace '\s+\(.*\)$', '').Trim()
+        # "memory_corruption (nt!...)" -> skip
+        if ($clean -match '(?i)^memory_corruption') { continue }
+        if ($clean -match '(?i)^unknown') { continue }
+        if ($junk -contains $clean) { continue }
+        if ($clean -match '(?i)\.(sys|dll|exe)$') { return $clean }
+        if ($clean -match '!' ) {
+            # nt!Wheap... is not a 3rd-party culprit; keep only if non-nt
+            if ($clean -match '(?i)^(nt|ntoskrnl|hal)!') { continue }
+            return $clean
+        }
+        if ($clean -and $clean.Length -lt 64) { return $clean }
+    }
+
+    if ($FailureBucket -match '(?i)LKD_MEMORY_CORRUPTION') { return $null }
+    if ($FailureBucket -match '(?i)WHEA') { return $null }
+    return $null
+}
+
 function Parse-AnalyzeOutput {
-    param([string]$Output)
+    param(
+        [string]$Output,
+        [string]$DumpPath = ''
+    )
 
     $parsed = [ordered]@{
         BugcheckName     = 'Unknown'
@@ -533,30 +739,74 @@ function Parse-AnalyzeOutput {
         StackSummary     = ''
         SymbolName       = ''
         ProbablyCausedBy = ''
+        DumpKind         = 'Unknown'
+        IsLiveKernelDump = $false
     }
 
     if ([string]::IsNullOrWhiteSpace($Output)) { return [PSCustomObject]$parsed }
 
-    if ($Output -match 'BugCheck\s+([A-Z0-9_]+)') { $parsed.BugcheckName = $Matches[1] }
-    if ($Output -match 'Bugcheck code\s+(\w+)') {
-        $raw = $Matches[1]
-        if ($raw -match '^0x') { $parsed.BugcheckCode = Convert-BugcheckToHex $raw }
-        else {
-            try { $parsed.BugcheckCode = Convert-BugcheckToHex ([Convert]::ToUInt32($raw, 16)) }
-            catch { $parsed.BugcheckCode = $raw }
+    $isLkd = Test-IsLiveKernelDumpName -Name (Split-Path $DumpPath -Leaf) -FullName $DumpPath
+    if (-not $isLkd) {
+        $isLkd = ($Output -match '(?i)Live Kernel Dump' -or $Output -match '(?i)LKD_' -or $Output -match '(?i)WheapReportLiveDump')
+    }
+    $parsed.IsLiveKernelDump = [bool]$isLkd
+    if ($DumpPath -match '(?i)WHEA-') { $parsed.DumpKind = 'WHEA Live Kernel Dump' }
+    elseif ($DumpPath -match '(?i)WATCHDOG-') { $parsed.DumpKind = 'Watchdog Live Kernel Dump' }
+    elseif ($isLkd) { $parsed.DumpKind = 'Live Kernel Dump' }
+    else { $parsed.DumpKind = 'Bugcheck / minidump' }
+
+    # Prefer explicit fields; do NOT match "BugCheck Analysis" headings
+    if ($Output -match '(?im)^BUGCHECK_CODE:\s*([0-9a-fA-Fx]+)') {
+        $parsed.BugcheckCode = Convert-BugcheckToHex $Matches[1]
+    }
+    elseif ($Output -match '(?i)Bugcheck code\s*[:=]?\s*(0x[0-9a-fA-F]+|\w+)') {
+        $parsed.BugcheckCode = Convert-BugcheckToHex $Matches[1]
+    }
+
+    if ($Output -match '(?im)^BUGCHECK_STR:\s*([A-Z0-9_]+)') {
+        $parsed.BugcheckName = $Matches[1]
+    }
+    elseif ($Output -match '(?i)BugCheck\s+([A-Z0-9_]+)\s*\(') {
+        $parsed.BugcheckName = $Matches[1]
+    }
+    elseif ($Output -match '(?i)BugCheck\s+([A-Z0-9_]{6,})\b' -and $Matches[1] -ne 'Analysis') {
+        $parsed.BugcheckName = $Matches[1]
+    }
+
+    # WER path Kernel_124_... / Kernel_7e_...
+    if (($parsed.BugcheckCode -eq 'Unknown' -or -not $parsed.BugcheckCode) -and $DumpPath) {
+        $fromPath = Get-BugcheckCodeFromDumpPath -DumpPath $DumpPath
+        if ($fromPath) { $parsed.BugcheckCode = $fromPath }
+    }
+
+    if ($parsed.BugcheckCode -and $parsed.BugcheckCode -ne 'Unknown') {
+        $info = Resolve-BugcheckInfo -CodeHex $parsed.BugcheckCode
+        if ($parsed.BugcheckName -eq 'Unknown' -or $parsed.BugcheckName -eq 'Analysis') {
+            $parsed.BugcheckName = $info.Name
         }
     }
+
     if ($Output -match 'ExceptionCode:\s*(0x\w+)') { $parsed.ExceptionCode = $Matches[1] }
-    if ($Output -match 'IMAGE_NAME:\s*(.+)') { $parsed.FaultingModule = $Matches[1].Trim() }
-    if ($Output -match 'MODULE_NAME:\s*(.+)') { $parsed.FaultingDriver = $Matches[1].Trim() }
-    if ($Output -match 'FAILURE_BUCKET_ID:\s*(.+)') { $parsed.FailureBucket = $Matches[1].Trim() }
-    if ($Output -match 'PROCESS_NAME:\s*(.+)') { $parsed.ProcessName = $Matches[1].Trim() }
-    if ($Output -match 'SYMBOL_NAME:\s*(.+)') { $parsed.SymbolName = $Matches[1].Trim() }
-    if ($Output -match 'Probably caused by\s*:\s*(.+)') { $parsed.ProbablyCausedBy = $Matches[1].Trim() }
+    if ($Output -match '(?im)^IMAGE_NAME:\s*(.+)$') { $parsed.FaultingModule = $Matches[1].Trim() }
+    if ($Output -match '(?im)^MODULE_NAME:\s*(.+)$') { $parsed.FaultingDriver = $Matches[1].Trim() }
+    if ($Output -match '(?im)^FAILURE_BUCKET_ID:\s*(.+)$') { $parsed.FailureBucket = $Matches[1].Trim() }
+    if ($Output -match '(?im)^PROCESS_NAME:\s*(.+)$') { $parsed.ProcessName = $Matches[1].Trim() }
+    if ($Output -match '(?im)^SYMBOL_NAME:\s*(.+)$') { $parsed.SymbolName = $Matches[1].Trim() }
+    if ($Output -match '(?i)Probably caused by\s*:\s*(.+)$') { $parsed.ProbablyCausedBy = $Matches[1].Trim() }
 
     if ($Output -match '(?s)STACK_TEXT:(.*?)(?:SYMBOL_NAME:|FOLLOWUP_IP:|MODULE_NAME:|IMAGE_NAME:|FAILURE_BUCKET_ID:|$)') {
         $stackLines = $Matches[1] -split "`r?`n" | Where-Object { $_.Trim() -ne '' } | Select-Object -First 5
         $parsed.StackSummary = ($stackLines -join ' > ').Trim()
+    }
+
+    # Replace junk IMAGE_NAME values like memory_corruption with a cleaner module if possible
+    $clean = Get-CleanFaultingModule -Module $parsed.FaultingModule -Driver $parsed.FaultingDriver -ProbablyCausedBy $parsed.ProbablyCausedBy -FailureBucket $parsed.FailureBucket
+    if ($clean) {
+        $parsed.FaultingModule = $clean
+    }
+    elseif ($parsed.FaultingModule -match '(?i)^memory_corruption' -or $parsed.FaultingDriver -match '(?i)^memory_corruption') {
+        $parsed.FaultingModule = ''
+        $parsed.FaultingDriver = ''
     }
 
     return [PSCustomObject]$parsed
@@ -577,48 +827,91 @@ function Invoke-MinidumpAnalysis {
         return [PSCustomObject]@{ Success = $false; Reason = 'Debugger missing'; DumpPath = $DumpPath; Parsed = $null; LogPath = $null }
     }
 
+    # Same approach as Intune Remediations/BSODDiag/Remediate.ps1:
+    #   cdb -z "<dump>" -y "<symbols>" -c ".symfix;.reload;!analyze -v;q"
+    # Capture stdout; do NOT use .logopen / fragile nested quoting (that can leave cdb at a prompt and hang).
     $symbolPath = 'srv*C:\Symbols*https://msdl.microsoft.com/download/symbols'
     $kind = $Debugger.Kind
     $exe = $Debugger.Path
     $exitCode = $null
-
-    # Use .logopen so both cdb and WinDbgX write a parseable log file.
-    $logEscaped = $LogPath.Replace('"', '')
-    $commands = ".symfix;.reload;.logopen `"$logEscaped`";!analyze -v;.logclose;q"
-
-    if ($kind -eq 'cdb') {
-        $argList = @('-z', $DumpPath, '-y', $symbolPath, '-c', $commands, '-logo', $LogPath)
-    }
-    else {
-        # WinDbg Preview / WinDbgX
-        $argList = @('-z', $DumpPath, '-y', $symbolPath, '-c', $commands)
-    }
+    $commands = '.symfix;.reload;!analyze -v;q'
 
     Write-Info "Running $($kind) !analyze -v on $(Split-Path $DumpPath -Leaf) (timeout ${TimeoutSec}s)..." 'Yellow'
+    Write-Info "Command: `"$exe`" -z `"$DumpPath`" -y `"$symbolPath`" -c `"$commands`"" 'Gray'
 
+    $raw = ''
     try {
-        $p = Start-Process -FilePath $exe -ArgumentList $argList -NoNewWindow -PassThru -WindowStyle Hidden
-        $exited = $p.WaitForExit($TimeoutSec * 1000)
-        if (-not $exited) {
-            try { $p.Kill() } catch { }
-            return [PSCustomObject]@{ Success = $false; Reason = "Timed out after ${TimeoutSec}s"; DumpPath = $DumpPath; Parsed = $null; LogPath = $LogPath }
+        if ($kind -eq 'cdb') {
+            $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $processInfo.FileName = $exe
+            $processInfo.Arguments = "-z `"$DumpPath`" -y `"$symbolPath`" -c `"$commands`""
+            $processInfo.RedirectStandardOutput = $true
+            $processInfo.RedirectStandardError = $true
+            $processInfo.UseShellExecute = $false
+            $processInfo.CreateNoWindow = $true
+
+            $process = New-Object System.Diagnostics.Process
+            $process.StartInfo = $processInfo
+            [void]$process.Start()
+
+            # Async reads avoid stdout/stderr pipe deadlocks while waiting
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+
+            if (-not $process.WaitForExit($TimeoutSec * 1000)) {
+                try {
+                    if (-not $process.HasExited) {
+                        $process.Kill()
+                        [void]$process.WaitForExit(5000)
+                    }
+                }
+                catch { }
+                return [PSCustomObject]@{
+                    Success  = $false
+                    Reason   = "Timed out after ${TimeoutSec}s (cdb still running - often symbol download or dump I/O)"
+                    DumpPath = $DumpPath
+                    Parsed   = $null
+                    LogPath  = $LogPath
+                }
+            }
+
+            $exitCode = $process.ExitCode
+            $stdout = $stdoutTask.Result
+            $stderr = $stderrTask.Result
+            $raw = (($stdout, $stderr) | Where-Object { $_ }) -join "`r`n"
         }
-        $exitCode = $p.ExitCode
+        else {
+            # WinDbg Preview: keep a simple -c string; log via our own capture file if process supports it
+            $argString = "-z `"$DumpPath`" -y `"$symbolPath`" -c `"$commands`""
+            $p = Start-Process -FilePath $exe -ArgumentList $argString -PassThru -WindowStyle Hidden -Wait -ErrorAction Stop
+            # WinDbgX often won't give us stdout; fall through to empty and report
+            $exitCode = $p.ExitCode
+            if (Test-Path -LiteralPath $LogPath) {
+                $raw = Get-Content -LiteralPath $LogPath -Raw -ErrorAction SilentlyContinue
+            }
+        }
     }
     catch {
         return [PSCustomObject]@{ Success = $false; Reason = $_.Exception.Message; DumpPath = $DumpPath; Parsed = $null; LogPath = $LogPath }
     }
 
-    $raw = ''
-    if (Test-Path -LiteralPath $LogPath) {
-        $raw = Get-Content -LiteralPath $LogPath -Raw -ErrorAction SilentlyContinue
+    if (-not [string]::IsNullOrWhiteSpace($raw) -and $LogPath) {
+        try { Set-Content -LiteralPath $LogPath -Value $raw -Encoding UTF8 } catch { }
     }
+
     if ([string]::IsNullOrWhiteSpace($raw)) {
         return [PSCustomObject]@{ Success = $false; Reason = "$kind produced no log output"; DumpPath = $DumpPath; Parsed = $null; LogPath = $LogPath }
     }
 
-    $parsed = Parse-AnalyzeOutput -Output $raw
-    $ok = ($parsed.FaultingModule -or $parsed.FaultingDriver -or ($parsed.BugcheckCode -and $parsed.BugcheckCode -ne 'Unknown') -or $parsed.ProbablyCausedBy)
+    $parsed = Parse-AnalyzeOutput -Output $raw -DumpPath $DumpPath
+    $ok = (
+        $parsed.FaultingModule -or
+        $parsed.FaultingDriver -or
+        ($parsed.BugcheckCode -and $parsed.BugcheckCode -ne 'Unknown') -or
+        $parsed.ProbablyCausedBy -or
+        $parsed.FailureBucket -or
+        $parsed.IsLiveKernelDump
+    )
 
     return [PSCustomObject]@{
         Success    = [bool]$ok
@@ -652,14 +945,24 @@ function Invoke-DumpAnalysisPass {
     $candidates = @(
         $Dumps |
             Where-Object { $_ -and $_.FullName -and (Test-Path -LiteralPath $_.FullName) } |
-            Where-Object { $_.LengthMB -le $MaxSizeMB } |
-            Sort-Object @{ Expression = 'IsMinidump'; Descending = $true }, LastWriteTime -Descending |
+            Where-Object { $null -ne $_.LengthMB -and $_.LengthMB -le $MaxSizeMB } |
+            ForEach-Object {
+                $priority = 1
+                $name = $_.Name
+                $full = $_.FullName
+                if ($full -match '\\Minidump\\' -or $name -match '^\d{6}-\d+-') { $priority = 4 }
+                elseif ($full -match '\\ReportQueue\\|\\ReportArchive\\' -and $name -notmatch '(?i)^(WHEA|WATCHDOG)-') { $priority = 3 }
+                elseif ($name -match '^MEMORY\.DMP$') { $priority = 2 }
+                elseif ($full -match '\\LiveKernelReports\\' -or $name -match '(?i)^(WHEA|WATCHDOG)-') { $priority = 0 }
+                $_ | Add-Member -NotePropertyName AnalyzePriority -NotePropertyValue $priority -Force -PassThru
+            } |
+            Sort-Object @{ Expression = 'AnalyzePriority'; Descending = $true }, @{ Expression = 'IsMinidump'; Descending = $true }, LastWriteTime -Descending |
             Select-Object -First $MaxDumps
     )
 
     if ($candidates.Count -eq 0) {
         Write-Info "No dumps under ${MaxSizeMB} MB available to analyze." 'Yellow'
-        return @()
+        return , @()
     }
 
     $i = 0
@@ -668,18 +971,21 @@ function Invoke-DumpAnalysisPass {
         $safeName = ($d.Name -replace '[^\w\.-]', '_')
         $logPath = Join-Path $analyzeDir ("analyze-{0:D2}-{1}.txt" -f $i, $safeName)
         $result = Invoke-MinidumpAnalysis -DumpPath $d.FullName -Debugger $Debugger -LogPath $logPath -TimeoutSec $TimeoutSec
-        [void]$results.Add($result)
+        if ($null -ne $result) { [void]$results.Add($result) }
 
-        if ($result.Success) {
+        if ($result -and $result.Success) {
             $p = $result.Parsed
-            Write-Info "OK: $($result.DumpName) -> $($p.BugcheckCode) / module=$($p.FaultingModule) driver=$($p.FaultingDriver)" 'Green'
+            $mod = Get-CleanFaultingModule -Module $p.FaultingModule -Driver $p.FaultingDriver -ProbablyCausedBy $p.ProbablyCausedBy -FailureBucket $p.FailureBucket
+            $modLabel = if ($mod) { $mod } elseif ($p.FailureBucket) { $p.FailureBucket } else { 'n/a' }
+            Write-Info "OK: $($result.DumpName) -> $($p.BugcheckCode) $($p.BugcheckName) / $modLabel [$($p.DumpKind)]" 'Green'
         }
         else {
-            Write-Info "Skip/fail: $($d.Name) - $($result.Reason)" 'Yellow'
+            $reason = if ($result) { $result.Reason } else { 'unknown failure' }
+            Write-Info "Skip/fail: $($d.Name) - $reason" 'Yellow'
         }
     }
 
-    return @($results)
+    return , @($results.ToArray())
 }
 #endregion WinDbg
 
@@ -702,19 +1008,86 @@ function Build-RootCauseAssessment {
     if ($analysisOk.Count -gt 0) {
         $best = $analysisOk | Select-Object -First 1
         $p = $best.Parsed
-        $mod = if ($p.FaultingModule) { $p.FaultingModule } elseif ($p.FaultingDriver) { $p.FaultingDriver } else { 'unknown module' }
-        $codeLabel = if ($p.BugcheckCode -and $p.BugcheckCode -ne 'Unknown') { $p.BugcheckCode } else { 'unknown code' }
-        $nameLabel = if ($p.BugcheckName -and $p.BugcheckName -ne 'Unknown') { $p.BugcheckName } else { '' }
-        $headline = "Dump analysis: $codeLabel $nameLabel likely caused by $mod"
-        $primaryCode = if ($p.BugcheckCode -ne 'Unknown') { $p.BugcheckCode } else { $null }
-        $confidence = 'High'
-        [void]$findings.Add("WinDbg !analyze -v on $($best.DumpName): probably caused by $mod")
-        if ($p.ProbablyCausedBy) { [void]$findings.Add("Probably caused by: $($p.ProbablyCausedBy)") }
-        if ($p.FailureBucket) { [void]$findings.Add("Failure bucket: $($p.FailureBucket)") }
+        $mod = Get-CleanFaultingModule -Module $p.FaultingModule -Driver $p.FaultingDriver -ProbablyCausedBy $p.ProbablyCausedBy -FailureBucket $p.FailureBucket
+        $codeLabel = if ($p.BugcheckCode -and $p.BugcheckCode -ne 'Unknown') { $p.BugcheckCode } else { $null }
+        $nameLabel = if ($p.BugcheckName -and $p.BugcheckName -notin @('Unknown', 'Analysis')) { $p.BugcheckName } else { '' }
+        if (-not $nameLabel -and $codeLabel) {
+            $nameLabel = (Resolve-BugcheckInfo -CodeHex $codeLabel).Name
+        }
+
+        if ($p.IsLiveKernelDump -or $best.DumpName -match '(?i)^(WHEA|WATCHDOG)-') {
+            $kind = if ($p.DumpKind) { $p.DumpKind } else { 'Live Kernel Dump' }
+            if ($codeLabel) {
+                $headline = "$kind analysis: $codeLabel $nameLabel"
+            }
+            else {
+                $headline = "$kind analysis from $($best.DumpName)"
+            }
+            if ($p.FailureBucket -match '(?i)MEMORY_CORRUPTION') {
+                $headline += ' - kernel reported memory corruption (hardware or driver)'
+            }
+            $confidence = 'Medium'
+            [void]$findings.Add("Analyzed live kernel dump $($best.DumpName) (not a classic BSOD minidump).")
+            if ($codeLabel) { [void]$findings.Add("WER/dump path stop code: $codeLabel $nameLabel") }
+            if ($p.FailureBucket) { [void]$findings.Add("Failure bucket: $($p.FailureBucket)") }
+            if ($p.FailureBucket -match '(?i)LKD_MEMORY_CORRUPTION' -or $best.DumpName -match '(?i)^WHEA-') {
+                [void]$findings.Add('This pattern often points to RAM/CPU/firmware/WHEA issues rather than a single named 3rd-party .sys.')
+                [void]$actions.Add('Run Windows Memory Diagnostic / memtest; reseat RAM; try with XMP/DOCP off.')
+                [void]$actions.Add('Update BIOS/firmware and review WHEA-Logger events around the dump timestamp.')
+            }
+            if ($best.DumpName -match '(?i)^WATCHDOG-') {
+                [void]$findings.Add('Watchdog live dumps often indicate a DPC/ISR stall (storage, GPU, USB, or filter driver).')
+                [void]$actions.Add('Update storage/GPU/chipset drivers and check for stuck devices or docks.')
+            }
+            if ($mod) {
+                [void]$findings.Add("Possible module signal: $mod")
+                [void]$actions.Add("Investigate module: $mod")
+            }
+            else {
+                [void]$actions.Add('Do not chase IMAGE_NAME=memory_corruption as a driver filename - it is a bucket class, not a .sys.')
+            }
+        }
+        else {
+            if ($codeLabel -and $mod) {
+                $headline = "Dump analysis: $codeLabel $nameLabel likely caused by $mod"
+            }
+            elseif ($codeLabel) {
+                $headline = "Dump analysis: $codeLabel $nameLabel"
+            }
+            elseif ($mod) {
+                $headline = "Dump analysis likely caused by $mod"
+            }
+            else {
+                $headline = "Dump analysis completed for $($best.DumpName)"
+            }
+            $confidence = 'High'
+            [void]$findings.Add("WinDbg !analyze -v on $($best.DumpName)")
+            if ($mod) { [void]$findings.Add("Faulting module: $mod") }
+            if ($p.ProbablyCausedBy) { [void]$findings.Add("Probably caused by: $($p.ProbablyCausedBy)") }
+            if ($p.FailureBucket) { [void]$findings.Add("Failure bucket: $($p.FailureBucket)") }
+            if ($mod) { [void]$actions.Add("Update, roll back, or remove the driver/module implicated: $mod") }
+        }
+
+        $primaryCode = $codeLabel
         if ($p.ProcessName) { [void]$findings.Add("Process name: $($p.ProcessName)") }
         if ($p.StackSummary) { [void]$findings.Add("Stack: $($p.StackSummary)") }
-        [void]$actions.Add("Update, roll back, or remove the driver/module implicated: $mod")
-        [void]$actions.Add("Keep the windbg\analyze-*.txt logs with this report when escalating.")
+
+        # Enrich actions from dump context (bucket / process / stack)
+        if ($p.FailureBucket -match '(?i)MEMORY_CORRUPTION') {
+            [void]$actions.Add('Run Windows Memory Diagnostic (mdsched) or memtest86; reseat RAM and retest with XMP/DOCP off.')
+            [void]$actions.Add('Update BIOS/firmware; check for known memory or chipset issues on this model.')
+        }
+        if ($p.ProcessName -match '(?i)DellPair|DellSupport|SupportAssist|DDV|Wave|Nahimic|Mystic|Armoury') {
+            [void]$actions.Add("Update or temporarily uninstall OEM/background component related to $($p.ProcessName).")
+        }
+        if ($p.StackSummary -match '(?i)CSDeviceControl|Dell|nvlddmkm|dxgkrnl|dxgmms|iaStor|stornvme|NETIO|tcpip') {
+            [void]$actions.Add('Stack shows vendor/filter activity - update or remove the matching OEM/security/filter driver and retest.')
+        }
+        if ($codeLabel) {
+            $info = Resolve-BugcheckInfo -CodeHex $codeLabel
+            foreach ($a in (Get-Array $info.Actions)) { [void]$actions.Add($a) }
+        }
+        [void]$actions.Add('Keep the windbg\analyze-*.txt logs with this report when escalating.')
     }
     elseif ($bugList.Count -eq 0) {
         $k41 = @($relList | Where-Object { $_.Type -like 'Kernel-Power 41*' })
@@ -806,18 +1179,143 @@ function Build-RootCauseAssessment {
         [void]$findings.Add('Script was NOT elevated - some events/dumps may be missing. Re-run as Administrator for complete RCA.')
     }
 
+    # Deduplicate actions while preserving order
+    $deduped = New-Object System.Collections.Generic.List[string]
+    $seenAction = @{}
+    foreach ($a in $actions) {
+        if ([string]::IsNullOrWhiteSpace($a)) { continue }
+        $key = $a.Trim().ToLowerInvariant()
+        if ($seenAction.ContainsKey($key)) { continue }
+        $seenAction[$key] = $true
+        [void]$deduped.Add($a.Trim())
+    }
+
+    $nextSteps = Build-NextSteps -AssessmentActions @($deduped) -PrimaryCode $primaryCode -Findings @($findings) -DumpAnalyses $analysisOk -DumpConfig $DumpConfig -Context $Context
+
     [PSCustomObject]@{
         Headline           = $headline
         Confidence         = $confidence
         PrimaryBugcheck    = $primaryCode
         Findings           = @($findings)
-        RecommendedActions = @($actions)
+        RecommendedActions = @($deduped)
+        NextSteps          = @($nextSteps)
         BugcheckCount      = $bugList.Count
         RelatedEventCount  = $relList.Count
         DumpCount          = $dumpList.Count
         DumpAnalysisCount  = $analysisOk.Count
-        FaultingModule     = if ($analysisOk.Count -gt 0) { $analysisOk[0].Parsed.FaultingModule } else { $null }
+        FaultingModule     = if ($analysisOk.Count -gt 0) {
+            $ap = $analysisOk[0].Parsed
+            Get-CleanFaultingModule -Module $ap.FaultingModule -Driver $ap.FaultingDriver -ProbablyCausedBy $ap.ProbablyCausedBy -FailureBucket $ap.FailureBucket
+        } else { $null }
     }
+}
+
+function Build-NextSteps {
+    param(
+        [string[]]$AssessmentActions,
+        [string]$PrimaryCode,
+        [string[]]$Findings,
+        $DumpAnalyses,
+        $DumpConfig,
+        $Context
+    )
+
+    $steps = New-Object System.Collections.Generic.List[object]
+    $n = 0
+    function Add-Step {
+        param([string]$Title, [string]$Detail, [string]$Why = '')
+        [void]$steps.Add([PSCustomObject]@{
+            Number = $steps.Count + 1
+            Title  = $Title
+            Detail = $Detail
+            Why    = $Why
+        })
+    }
+
+    $best = @(Get-Array $DumpAnalyses | Select-Object -First 1)[0]
+    $bucket = if ($best -and $best.Parsed) { $best.Parsed.FailureBucket } else { '' }
+    $proc = if ($best -and $best.Parsed) { $best.Parsed.ProcessName } else { '' }
+    $stack = if ($best -and $best.Parsed) { $best.Parsed.StackSummary } else { '' }
+    $mod = if ($best -and $best.Parsed) {
+        Get-CleanFaultingModule -Module $best.Parsed.FaultingModule -Driver $best.Parsed.FaultingDriver -ProbablyCausedBy $best.Parsed.ProbablyCausedBy -FailureBucket $best.Parsed.FailureBucket
+    } else { $null }
+
+    if ($PrimaryCode) {
+        $info = Resolve-BugcheckInfo -CodeHex $PrimaryCode
+        Add-Step -Title "Address stop code $PrimaryCode ($($info.Name))" `
+            -Detail (($info.Actions | Select-Object -First 2) -join ' ') `
+            -Why $info.Likely
+    }
+
+    if ($bucket -match '(?i)MEMORY_CORRUPTION') {
+        Add-Step -Title 'Rule out memory corruption' `
+            -Detail 'Run Windows Memory Diagnostic (mdsched.exe) or an overnight memtest. Reseat RAM and retest with XMP/DOCP disabled.' `
+            -Why "Failure bucket $bucket indicates the kernel detected corrupted memory structures."
+    }
+
+    if ($mod) {
+        Add-Step -Title "Investigate module $mod" `
+            -Detail "Update, roll back, or temporarily remove $mod (or the product that ships it). Reboot and watch for recurrence." `
+            -Why 'Dump analysis pointed at this module as the most actionable software signal.'
+    }
+
+    if ($proc -match '(?i)DellPair|DellSupport|SupportAssist|DDV') {
+        Add-Step -Title "Check Dell background component ($proc)" `
+            -Detail "Update Dell Pair / SupportAssist / related OEM apps from Dell Command Update, or uninstall temporarily to test stability." `
+            -Why "Process $proc was active in the crash analysis."
+    }
+    elseif ($proc -and $proc -notmatch '(?i)^(System|smss|csrss|svchost)\.exe$') {
+        Add-Step -Title "Review process $proc" `
+            -Detail "Identify which product owns $proc and update or remove it if it is OEM/AV/filter software." `
+            -Why 'This process appeared in the dump analysis context.'
+    }
+
+    if ($stack -match '(?i)CSDeviceControl') {
+        Add-Step -Title 'Investigate Dell CSDeviceControl / pairing stack' `
+            -Detail 'Update or remove Dell Pair / Dell peripheral pairing components. Check Device Manager for Dell virtual devices with errors.' `
+            -Why 'Stack text includes CSDeviceControl, which is commonly Dell pairing/device-control related.'
+    }
+
+    if ($DumpConfig -and $DumpConfig.CrashDumpEnabled -eq 3) {
+        Add-Step -Title 'Consider enabling Automatic/Kernel dumps' `
+            -Detail 'Small minidumps are better than nothing, but Automatic (7) or Kernel (2) dumps give stronger follow-up analysis if crashes continue.' `
+            -Why "Current crash dump type is $($DumpConfig.CrashDumpType)."
+    }
+
+    if (-not $Context.IsAdmin) {
+        Add-Step -Title 'Re-run elevated' `
+            -Detail 'Right-click PowerShell > Run as administrator, then re-run this script for complete event/dump access.' `
+            -Why 'This run was not elevated.'
+    }
+
+    # Fill remaining slots from assessment actions (skip near-duplicates)
+    foreach ($a in (Get-Array $AssessmentActions)) {
+        if ($steps.Count -ge 8) { break }
+        $already = $false
+        foreach ($s in $steps) {
+            if ($a -and ($s.Detail -like "*$($a.Substring(0, [Math]::Min(40, $a.Length)))*" -or $s.Title -like "*$($a.Substring(0, [Math]::Min(24, $a.Length)))*")) {
+                $already = $true; break
+            }
+        }
+        if ($already) { continue }
+        if ($a -match '(?i)^Keep this HTML|^Change one variable|^Keep the windbg') { continue }
+        Add-Step -Title 'Follow-up action' -Detail $a -Why 'Derived from stop-code catalog and local evidence.'
+    }
+
+    # Always end with package/escalate guidance
+    Add-Step -Title 'Package evidence for escalation' `
+        -Detail 'Zip this report folder (HTML, TXT, JSON, dumps\, windbg\) and attach it to the ticket or send to Tier 3 / vendor support.' `
+        -Why 'Preserves dump analysis logs and timeline for someone else to continue.'
+
+    Add-Step -Title 'Change one variable at a time' `
+        -Detail 'After each change (driver, RAM stick, BIOS setting, OEM app), reboot and monitor before making the next change.' `
+        -Why 'Makes it clear which fix stopped the crashes.'
+
+    # Renumber
+    for ($i = 0; $i -lt $steps.Count; $i++) {
+        $steps[$i].Number = $i + 1
+    }
+    return , @($steps)
 }
 #endregion RCA Engine
 
@@ -838,7 +1336,8 @@ function New-HtmlReport {
         "<tr><td>$(ConvertTo-HtmlEncoded $r.TimeCreated)</td><td>$(ConvertTo-HtmlEncoded $r.Type)</td><td>$(ConvertTo-HtmlEncoded $r.Summary)</td><td>$(ConvertTo-HtmlEncoded $r.Message)</td></tr>"
     }
     $rowsDump = foreach ($d in (Get-Array $Dumps)) {
-        "<tr><td>$(ConvertTo-HtmlEncoded $d.LastWriteTime)</td><td>$(ConvertTo-HtmlEncoded $d.FullName)</td><td>$($d.LengthMB)</td><td>$($d.AgeDays)</td></tr>"
+        $exists = if ($null -eq $d.Exists -or $d.Exists) { 'Yes' } else { 'Missing' }
+        "<tr><td>$(ConvertTo-HtmlEncoded $d.LastWriteTime)</td><td>$(ConvertTo-HtmlEncoded $d.FullName)</td><td>$($d.LengthMB)</td><td>$($d.AgeDays)</td><td>$exists</td></tr>"
     }
     $rowsChg = foreach ($c in (Get-Array $Changes | Select-Object -First 40)) {
         "<tr><td>$(ConvertTo-HtmlEncoded $c.TimeCreated)</td><td>$(ConvertTo-HtmlEncoded $c.ChangeType)</td><td>$(ConvertTo-HtmlEncoded $c.Detail)</td></tr>"
@@ -855,7 +1354,26 @@ function New-HtmlReport {
     }
 
     $findingsLi = ((Get-Array $Assessment.Findings) | ForEach-Object { "<li>$(ConvertTo-HtmlEncoded $_)</li>" }) -join "`n"
-    $actionsLi = ((Get-Array $Assessment.RecommendedActions) | ForEach-Object { "<li>$(ConvertTo-HtmlEncoded $_)</li>" }) -join "`n"
+    $nextSteps = Get-Array $Assessment.NextSteps
+    if ($nextSteps.Count -eq 0) {
+        $nextSteps = Get-Array ($Assessment.RecommendedActions | ForEach-Object {
+                [PSCustomObject]@{ Number = 0; Title = 'Action'; Detail = $_; Why = '' }
+            })
+        for ($i = 0; $i -lt $nextSteps.Count; $i++) { $nextSteps[$i].Number = $i + 1 }
+    }
+    $nextStepsHtml = foreach ($s in $nextSteps) {
+        $why = if ($s.Why) { "<div class='why'><strong>Why:</strong> $(ConvertTo-HtmlEncoded $s.Why)</div>" } else { '' }
+        @"
+<div class="step">
+  <div class="step-num">$($s.Number)</div>
+  <div class="step-body">
+    <div class="step-title">$(ConvertTo-HtmlEncoded $s.Title)</div>
+    <div class="step-detail">$(ConvertTo-HtmlEncoded $s.Detail)</div>
+    $why
+  </div>
+</div>
+"@
+    }
     $confColor = switch ($Assessment.Confidence) { 'High' { '#0b7a0b' } 'Medium' { '#9a6b00' } default { '#8a1f1f' } }
 
     $html = @"
@@ -869,6 +1387,13 @@ h1,h2{color:#0b3d5c}.card{background:#fff;border:1px solid #ddd;border-radius:8p
 .badge{display:inline-block;padding:2px 10px;border-radius:999px;background:$confColor;color:#fff;font-size:.85rem}
 table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{border:1px solid #e2e2e2;padding:8px;vertical-align:top;text-align:left}
 th{background:#eef5fa}tr:nth-child(even){background:#f9fbfd}code{background:#f0f0f0;padding:1px 4px;border-radius:3px}ul{line-height:1.45}
+.next-card{border-color:#8eb6d8;background:linear-gradient(180deg,#f3f8fc 0%,#fff 48px)}
+.step{display:flex;gap:14px;padding:12px 0;border-bottom:1px solid #e6eef5}
+.step:last-child{border-bottom:0}
+.step-num{flex:0 0 32px;height:32px;border-radius:50%;background:#0b3d5c;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700}
+.step-title{font-weight:650;color:#0b3d5c;margin-bottom:4px}
+.step-detail{color:#222;line-height:1.4}
+.why{margin-top:6px;color:#5a6b78;font-size:.9rem}
 </style></head><body>
 <h1>Blue Screen Root Cause Analysis</h1>
 <p class="meta">Computer: <strong>$(ConvertTo-HtmlEncoded $Context.ComputerName)</strong> | Collected: $(ConvertTo-HtmlEncoded $Context.CollectedAt) | Lookback: $Days days | Elevated: $($Context.IsAdmin)</p>
@@ -879,7 +1404,11 @@ th{background:#eef5fa}tr:nth-child(even){background:#f9fbfd}code{background:#f0f
      | Dumps: $($Assessment.DumpCount) | WinDbg analyzed: $($Assessment.DumpAnalysisCount)
      $(if ($Assessment.FaultingModule) { "| Faulting module: <strong>$(ConvertTo-HtmlEncoded $Assessment.FaultingModule)</strong>" })</p>
   <h2>Findings</h2><ul>$findingsLi</ul>
-  <h2>Recommended next actions</h2><ul>$actionsLi</ul>
+</div>
+<div class="card next-card">
+  <h2>Next steps</h2>
+  <p class="meta">Do these in order. Change one thing at a time, then retest.</p>
+  $($nextStepsHtml -join "`n")
 </div>
 <div class="card"><h2>System context</h2>
 <table><tr><th>Field</th><th>Value</th></tr>
@@ -903,7 +1432,7 @@ $($rowsBug -join "`n")</table></div>
 <table><tr><th>Time</th><th>Type</th><th>Summary</th><th>Message preview</th></tr>
 $($rowsRel -join "`n")</table></div>
 <div class="card"><h2>Crash dump files</h2>
-<table><tr><th>Modified</th><th>Path</th><th>MB</th><th>Age (days)</th></tr>
+<table><tr><th>Modified</th><th>Path</th><th>MB</th><th>Age (days)</th><th>On disk</th></tr>
 $($rowsDump -join "`n")</table></div>
 <div class="card"><h2>Recent driver / software / hotfix changes</h2>
 <table><tr><th>Time</th><th>Type</th><th>Detail</th></tr>
@@ -935,8 +1464,17 @@ function New-TextReport {
     [void]$sb.AppendLine('Findings:')
     foreach ($f in (Get-Array $Assessment.Findings)) { [void]$sb.AppendLine(" - $f") }
     [void]$sb.AppendLine('')
-    [void]$sb.AppendLine('Recommended actions:')
-    foreach ($a in (Get-Array $Assessment.RecommendedActions)) { [void]$sb.AppendLine(" - $a") }
+    [void]$sb.AppendLine('NEXT STEPS')
+    [void]$sb.AppendLine(('-' * 70))
+    foreach ($s in (Get-Array $Assessment.NextSteps)) {
+        [void]$sb.AppendLine("$($s.Number). $($s.Title)")
+        [void]$sb.AppendLine("    $($s.Detail)")
+        if ($s.Why) { [void]$sb.AppendLine("    Why: $($s.Why)") }
+    }
+    if (@(Get-Array $Assessment.NextSteps).Count -eq 0) {
+        [void]$sb.AppendLine('Recommended actions:')
+        foreach ($a in (Get-Array $Assessment.RecommendedActions)) { [void]$sb.AppendLine(" - $a") }
+    }
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('WINDBG / CDB ANALYSIS')
     [void]$sb.AppendLine(('-' * 70))
@@ -967,7 +1505,8 @@ function New-TextReport {
     [void]$sb.AppendLine('DUMP FILES')
     [void]$sb.AppendLine(('-' * 70))
     foreach ($d in (Get-Array $Dumps)) {
-        [void]$sb.AppendLine("$($d.LastWriteTime)  $($d.LengthMB) MB  $($d.FullName)")
+        $exists = if ($null -eq $d.Exists -or $d.Exists) { 'on disk' } else { 'MISSING' }
+        [void]$sb.AppendLine("$($d.LastWriteTime)  $($d.LengthMB) MB  [$exists]  $($d.FullName)")
     }
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('RECENT CHANGES')
@@ -990,7 +1529,7 @@ else { Write-Info 'Not elevated - results may be incomplete. Right-click PowerSh
 $start = (Get-Date).AddDays(-$Days)
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 if (-not $OutputDirectory) {
-    $desktop = [Environment]::GetFolderPath('Desktop')
+    $desktop = Get-ReportRootDirectory
     $OutputDirectory = Join-Path $desktop "BSOD-RCA-$env:COMPUTERNAME-$stamp"
 }
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
@@ -1000,36 +1539,47 @@ $context = Get-SystemContext
 Write-Info "$($context.Manufacturer) $($context.Model) | $($context.OSCaption) build $($context.OSBuild)"
 Write-Info "Last boot: $($context.LastBoot) (uptime $($context.UptimeDays) days) | RAM: $($context.MemoryGB) GB"
 
-Write-Section '2/7 Crash dump configuration & files'
-$dumpConfig = Get-CrashDumpConfiguration
-$dumps = Get-Array (Get-DumpInventory)
-Write-Info "Dump type: $($dumpConfig.CrashDumpType) (CrashDumpEnabled=$($dumpConfig.CrashDumpEnabled))"
-if ($dumps.Count -gt 0) {
-    Write-Info "Found $($dumps.Count) dump file(s). Newest: $($dumps[0].Name) at $($dumps[0].LastWriteTime)" 'Green'
-}
-else {
-    Write-Info 'No dump files found under Minidump / MEMORY.DMP / LiveKernelReports.' 'Yellow'
-}
-
-Write-Section '3/7 Bugcheck events'
+Write-Section '2/7 Bugcheck events'
 $bugchecks = Get-Array (Get-BugcheckEvents -Start $start -MaxEvents $Count)
-if ($bugchecks.Count -gt 0) {
-    Write-Info "Found $($bugchecks.Count) bugcheck event(s)." 'Green'
+if (@($bugchecks).Count -gt 0) {
+    Write-Info "Found $(@($bugchecks).Count) bugcheck event(s)." 'Green'
     $bugchecks | Select-Object -First 5 | ForEach-Object {
-        Write-Info "$($_.TimeCreated)  $($_.BugcheckCode) $($_.BugcheckName)" 'Red'
+        $dumpNote = if ($_.DumpFile) { " | dump: $($_.DumpFile)" } else { '' }
+        Write-Info "$($_.TimeCreated)  $($_.BugcheckCode) $($_.BugcheckName)$dumpNote" 'Red'
     }
 }
 else {
     Write-Info 'No Event ID 1001 bugcheck records in lookback window.' 'Yellow'
 }
 
+Write-Section '3/7 Crash dump configuration & files'
+$dumpConfig = Get-CrashDumpConfiguration
+$extraDumpPaths = @(
+    $bugchecks |
+        Where-Object { $_.DumpFile } |
+        ForEach-Object { $_.DumpFile }
+)
+$dumps = Get-Array (Get-DumpInventory -ExtraPaths $extraDumpPaths -MinidumpDir $dumpConfig.MinidumpDir)
+$existingDumps = Get-Array ($dumps | Where-Object { $_.Exists -ne $false -and $_.FullName -and (Test-Path -LiteralPath $_.FullName) })
+Write-Info "Dump type: $($dumpConfig.CrashDumpType) (CrashDumpEnabled=$($dumpConfig.CrashDumpEnabled))"
+if (@($existingDumps).Count -gt 0) {
+    Write-Info "Found $(@($existingDumps).Count) dump file(s) on disk. Newest: $($existingDumps[0].Name) at $($existingDumps[0].LastWriteTime)" 'Green'
+}
+else {
+    Write-Info 'No dump files currently on disk under Minidump / MEMORY.DMP / LiveKernelReports / WER.' 'Yellow'
+    $missing = Get-Array ($dumps | Where-Object { $_.Exists -eq $false })
+    foreach ($m in $missing) {
+        Write-Info "Event reported dump but file is missing: $($m.FullName)" 'Yellow'
+    }
+}
+
 Write-Section '4/7 Related crash / hardware signals'
 $related = Get-Array (Get-RelatedCrashEvents -Start $start -MaxEvents $Count)
-Write-Info "Related events collected: $($related.Count)"
+Write-Info "Related events collected: $(@($related).Count)"
 
 Write-Section '5/7 Recent driver / software changes'
 $changes = Get-Array (Get-RecentDriverAndSoftwareChanges -Start $start)
-Write-Info "Change markers collected: $($changes.Count)"
+Write-Info "Change markers collected: $(@($changes).Count)"
 
 Write-Section '6/7 WinDbg / cdb dump analysis'
 $dumpAnalyses = @()
@@ -1037,8 +1587,8 @@ $debugger = Find-DumpDebugger
 if ($SkipDumpAnalysis) {
     Write-Info 'Dump analysis skipped (-SkipDumpAnalysis).' 'Yellow'
 }
-elseif ($dumps.Count -eq 0 -and -not $AnalyzeDumps) {
-    Write-Info 'No dumps to analyze.' 'Gray'
+elseif (@($existingDumps).Count -eq 0 -and -not $AnalyzeDumps) {
+    Write-Info 'No dumps on disk to analyze.' 'Gray'
 }
 else {
     $shouldInstall = (-not $debugger -or $InstallDebuggers) -and -not $SkipDebuggerInstall
@@ -1063,13 +1613,13 @@ else {
     else {
         Write-Info "Using debugger: $($debugger.Kind) ($($debugger.Source)) - $($debugger.Path)" 'Green'
         Write-Info 'First analysis may download symbols from Microsoft (needs internet).' 'Gray'
-        $dumpAnalyses = Get-Array (Invoke-DumpAnalysisPass -Dumps $dumps -Debugger $debugger -OutputDirectory $OutputDirectory -MaxDumps $MaxDumpsToAnalyze -MaxSizeMB $MaxDumpSizeMB -TimeoutSec $DumpAnalysisTimeoutSec)
-        Write-Info "Dump analysis results: $($dumpAnalyses.Count)"
+        $dumpAnalyses = Get-Array (Invoke-DumpAnalysisPass -Dumps $existingDumps -Debugger $debugger -OutputDirectory $OutputDirectory -MaxDumps $MaxDumpsToAnalyze -MaxSizeMB $MaxDumpSizeMB -TimeoutSec $DumpAnalysisTimeoutSec)
+        Write-Info "Dump analysis results: $(@($dumpAnalyses).Count)"
     }
 }
 
 Write-Section '7/7 Root cause assessment'
-$assessment = Build-RootCauseAssessment -Bugchecks $bugchecks -Related $related -Dumps $dumps -Changes $changes -DumpConfig $dumpConfig -Context $context -DumpAnalyses $dumpAnalyses
+$assessment = Build-RootCauseAssessment -Bugchecks $bugchecks -Related $related -Dumps $existingDumps -Changes $changes -DumpConfig $dumpConfig -Context $context -DumpAnalyses $dumpAnalyses
 Write-Host ""
 Write-Host "  $($assessment.Headline)" -ForegroundColor White
 $confColor = if ($assessment.Confidence -eq 'High') { 'Green' } elseif ($assessment.Confidence -eq 'Medium') { 'Yellow' } else { 'Red' }
@@ -1077,8 +1627,14 @@ Write-Info "Confidence: $($assessment.Confidence)" $confColor
 if ($assessment.FaultingModule) { Write-Info "Faulting module: $($assessment.FaultingModule)" 'Green' }
 foreach ($f in (Get-Array $assessment.Findings)) { Write-Info "- $f" 'Gray' }
 Write-Host ""
-Write-Info 'Next actions:' 'Cyan'
-foreach ($a in (Get-Array $assessment.RecommendedActions)) { Write-Info "- $a" 'White' }
+Write-Info 'Next steps:' 'Cyan'
+$steps = Get-Array $assessment.NextSteps
+if ($steps.Count -gt 0) {
+    foreach ($s in $steps) { Write-Info "$($s.Number). $($s.Title) - $($s.Detail)" 'White' }
+}
+else {
+    foreach ($a in (Get-Array $assessment.RecommendedActions)) { Write-Info "- $a" 'White' }
+}
 
 $htmlPath = Join-Path $OutputDirectory 'BSOD-RCA-Report.html'
 $txtPath = Join-Path $OutputDirectory 'BSOD-RCA-Report.txt'
@@ -1103,8 +1659,9 @@ New-TextReport -Context $context -Assessment $assessment -Bugchecks $bugchecks -
 $copyDir = Join-Path $OutputDirectory 'dumps'
 New-Item -ItemType Directory -Path $copyDir -Force | Out-Null
 $copied = 0
-foreach ($d in @($dumps | Select-Object -First 5)) {
+foreach ($d in @($existingDumps | Select-Object -First 5)) {
     if (-not $d -or -not $d.FullName) { continue }
+    if (-not (Test-Path -LiteralPath $d.FullName)) { continue }
     if ($d.LengthMB -le 500) {
         try {
             Copy-Item -LiteralPath $d.FullName -Destination $copyDir -ErrorAction Stop
